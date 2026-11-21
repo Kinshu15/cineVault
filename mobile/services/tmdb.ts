@@ -64,3 +64,20 @@ export const getTopRatedMovies = async (page = 1): Promise<Movie[]> => {
   const data: TMDBResponse<Movie> = await response.json();
   return data.results;
 };
+
+export const searchMovies = async (query: string, page = 1): Promise<Movie[]> => {
+  if (!query.trim()) {
+    return [];
+  }
+  const encodedQuery = encodeURIComponent(query.trim());
+  const url = READ_ACCESS_TOKEN
+    ? `${TMDB_BASE_URL}/search/movie?query=${encodedQuery}&page=${page}&include_adult=false`
+    : `${TMDB_BASE_URL}/search/movie?api_key=${API_KEY}&query=${encodedQuery}&page=${page}&include_adult=false`;
+
+  const response = await fetch(url, { headers: getHeaders() });
+  if (!response.ok) {
+    throw new Error(`Failed to search movies: ${response.status}`);
+  }
+  const data: TMDBResponse<Movie> = await response.json();
+  return data.results;
+};

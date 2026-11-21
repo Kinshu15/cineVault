@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -9,13 +9,24 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  TextInput,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Movie } from '../types/tmdb';
-import { getTrendingMovies, getPopularMovies, getTopRatedMovies, getImageUrl } from '../services/tmdb';
+import {
+  getTrendingMovies,
+  getPopularMovies,
+  getTopRatedMovies,
+  searchMovies,
+  getImageUrl,
+} from '../services/tmdb';
 
+const { width } = Dimensions.get('window');
 const POSTER_WIDTH = 120;
 const POSTER_HEIGHT = 180;
+const GRID_ITEM_WIDTH = (width - 48) / 2;
+const GRID_POSTER_HEIGHT = GRID_ITEM_WIDTH * 1.5;
 
 export default function HomeScreen() {
   const [trending, setTrending] = useState<Movie[]>([]);
@@ -24,6 +35,12 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchResults, setSearchResults] = useState<Movie[]>([]);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -49,28 +66,84 @@ export default function HomeScreen() {
     loadData();
   }, [loadData]);
 
+  // Debounced search effect
+  useEffect(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    searchTimeoutRef.current = setTimeout(async () => {
+      try {
+        const results = await searchMovies(trimmed);
+        setSearchResults(results);
+      } catch (err) {
+        console.error('Search error:', err);
+        setSearchResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 400);
+
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [searchQuery]);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     loadData();
   }, [loadData]);
 
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setSearchResults([]);
+    setIsSearching(false);
+  };
+
   const featuredMovie = trending[0];
 
-  const renderMovieCard = ({ item }: { item: Movie }) => {
+  const renderHorizontalCard = ({ item }: { item: Movie }) => {
     const releaseYear = item.release_date ? item.release_date.substring(0, 4) : '';
     const rating = item.vote_average ? item.vote_average.toFixed(1) : 'NR';
 
     return (
-      <TouchableOpacity
-        style={styles.card}
-        activeOpacity={0.8}
-        onPress={() => {
-          // Movie details navigation will be hooked up in next step
-        }}
-      >
+      <TouchableOpacity style={styles.card} activeOpacity={0.8}>
         <Image
           source={{ uri: getImageUrl(item.poster_path, 'w342') }}
           style={styles.poster}
+          resizeMode="cover"
+        />
+        <View style={styles.ratingBadge}>
+          <Text style={styles.ratingStar}>★</Text>
+          <Text style={styles.ratingText}>{rating}</Text>
+        </View>
+        <Text style={styles.movieTitle} numberOfLines={1}>
+          {item.title}
+        </Text>
+        {releaseYear ? <Text style={styles.movieYear}>{releaseYear}</Text> : null}
+      </TouchableOpacity>
+    );
+  };
+
+  const renderGridCard = ({ item }: { item: Movie }) => {
+    const releaseYear = item.release_date ? item.release_date.substring(0, 4) : '';
+    const rating = item.vote_average ? item.vote_average.toFixed(1) : 'NR';
+
+    return (
+      <TouchableOpacity style={styles.gridCard} activeOpacity={0.8}>
+        <Image
+          source={{ uri: getImageUrl(item.poster_path, 'w342') }}
+          style={styles.gridPoster}
           resizeMode="cover"
         />
         <View style={styles.ratingBadge}>
@@ -107,6 +180,8 @@ export default function HomeScreen() {
     );
   }
 
+  const isSearchActive = searchQuery.trim().length > 0;
+
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
       {/* Top Header */}
@@ -120,87 +195,150 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor="#F5C518"
-            colors={['#F5C518']}
+      {/* Search Bar */}
+      <View style={styles.searchContainer}>
+        <View style={styles.searchBar}>
+          <Text style={styles.searchIcon}>🔍</Text>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search movies by name..."
+            placeholderTextColor="#6B7280"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
           />
-        }
-      >
-        {/* Featured Movie Banner */}
-        {featuredMovie ? (
-          <View style={styles.featuredContainer}>
-            <Image
-              source={{ uri: getImageUrl(featuredMovie.backdrop_path || featuredMovie.poster_path, 'original') }}
-              style={styles.featuredBanner}
-              resizeMode="cover"
-            />
-            <View style={styles.featuredOverlay}>
-              <View style={styles.featuredBadge}>
-                <Text style={styles.featuredBadgeText}>#1 TRENDING TODAY</Text>
-              </View>
-              <Text style={styles.featuredTitle} numberOfLines={2}>
-                {featuredMovie.title}
+          {searchQuery.length > 0 ? (
+            <TouchableOpacity onPress={handleClearSearch} style={styles.clearButton} hitSlop={8}>
+              <Text style={styles.clearButtonText}>✕</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      </View>
+
+      {/* Main Content Area */}
+      {isSearchActive ? (
+        // Search Results View
+        <View style={styles.searchResultsContainer}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>
+              {isSearching ? 'Searching...' : `Results for "${searchQuery.trim()}"`}
+            </Text>
+            {!isSearching ? (
+              <Text style={styles.sectionCount}>{searchResults.length} found</Text>
+            ) : null}
+          </View>
+
+          {isSearching ? (
+            <View style={styles.searchLoadingContainer}>
+              <ActivityIndicator size="large" color="#F5C518" />
+              <Text style={styles.loadingText}>Searching movies...</Text>
+            </View>
+          ) : searchResults.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyIcon}>🎬</Text>
+              <Text style={styles.emptyTitle}>No Movies Found</Text>
+              <Text style={styles.emptySubtitle}>
+                We couldn't find anything matching &quot;{searchQuery.trim()}&quot;. Try a different title.
               </Text>
-              <View style={styles.featuredMeta}>
-                <Text style={styles.featuredRating}>★ {featuredMovie.vote_average.toFixed(1)}</Text>
-                <Text style={styles.featuredDot}>•</Text>
-                <Text style={styles.featuredYear}>
-                  {featuredMovie.release_date?.substring(0, 4)}
+            </View>
+          ) : (
+            <FlatList
+              data={searchResults}
+              keyExtractor={(item) => `search-${item.id}`}
+              renderItem={renderGridCard}
+              numColumns={2}
+              columnWrapperStyle={styles.gridRow}
+              contentContainerStyle={styles.gridContent}
+              showsVerticalScrollIndicator={false}
+            />
+          )}
+        </View>
+      ) : (
+        // Home Discovery Feed
+        <ScrollView
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor="#F5C518"
+              colors={['#F5C518']}
+            />
+          }
+        >
+          {/* Featured Movie Banner */}
+          {featuredMovie ? (
+            <View style={styles.featuredContainer}>
+              <Image
+                source={{ uri: getImageUrl(featuredMovie.backdrop_path || featuredMovie.poster_path, 'original') }}
+                style={styles.featuredBanner}
+                resizeMode="cover"
+              />
+              <View style={styles.featuredOverlay}>
+                <View style={styles.featuredBadge}>
+                  <Text style={styles.featuredBadgeText}>#1 TRENDING TODAY</Text>
+                </View>
+                <Text style={styles.featuredTitle} numberOfLines={2}>
+                  {featuredMovie.title}
                 </Text>
+                <View style={styles.featuredMeta}>
+                  <Text style={styles.featuredRating}>★ {featuredMovie.vote_average.toFixed(1)}</Text>
+                  <Text style={styles.featuredDot}>•</Text>
+                  <Text style={styles.featuredYear}>
+                    {featuredMovie.release_date?.substring(0, 4)}
+                  </Text>
+                </View>
               </View>
             </View>
+          ) : null}
+
+          {/* Section 1: Trending Today */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Trending Today</Text>
+            <Text style={styles.sectionCount}>{trending.length} titles</Text>
           </View>
-        ) : null}
+          <FlatList
+            data={trending}
+            keyExtractor={(item) => `trending-${item.id}`}
+            renderItem={renderHorizontalCard}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.horizontalList}
+          />
 
-        {/* Section 1: Trending Today */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Trending Today</Text>
-          <Text style={styles.sectionCount}>{trending.length} titles</Text>
-        </View>
-        <FlatList
-          data={trending}
-          keyExtractor={(item) => `trending-${item.id}`}
-          renderItem={renderMovieCard}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.horizontalList}
-        />
+          {/* Section 2: Popular Movies */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Popular Movies</Text>
+            <Text style={styles.sectionCount}>{popular.length} titles</Text>
+          </View>
+          <FlatList
+            data={popular}
+            keyExtractor={(item) => `popular-${item.id}`}
+            renderItem={renderHorizontalCard}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.horizontalList}
+          />
 
-        {/* Section 2: Popular Movies */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Popular Movies</Text>
-          <Text style={styles.sectionCount}>{popular.length} titles</Text>
-        </View>
-        <FlatList
-          data={popular}
-          keyExtractor={(item) => `popular-${item.id}`}
-          renderItem={renderMovieCard}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.horizontalList}
-        />
-
-        {/* Section 3: Top Rated */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Top Rated All Time</Text>
-          <Text style={styles.sectionCount}>{topRated.length} titles</Text>
-        </View>
-        <FlatList
-          data={topRated}
-          keyExtractor={(item) => `toprated-${item.id}`}
-          renderItem={renderMovieCard}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.horizontalList}
-        />
-      </ScrollView>
+          {/* Section 3: Top Rated */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Top Rated All Time</Text>
+            <Text style={styles.sectionCount}>{topRated.length} titles</Text>
+          </View>
+          <FlatList
+            data={topRated}
+            keyExtractor={(item) => `toprated-${item.id}`}
+            renderItem={renderHorizontalCard}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.horizontalList}
+          />
+        </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
@@ -291,6 +429,90 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 13,
   },
+  searchContainer: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: '#0B0C0E',
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#14161B',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 44,
+    borderWidth: 1,
+    borderColor: '#23262F',
+  },
+  searchIcon: {
+    fontSize: 14,
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  clearButton: {
+    padding: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  clearButtonText: {
+    color: '#9CA3AF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  searchResultsContainer: {
+    flex: 1,
+  },
+  searchLoadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 60,
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    paddingTop: 80,
+  },
+  emptyIcon: {
+    fontSize: 48,
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    color: '#9CA3AF',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  gridContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 40,
+  },
+  gridRow: {
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  gridCard: {
+    width: GRID_ITEM_WIDTH,
+  },
+  gridPoster: {
+    width: GRID_ITEM_WIDTH,
+    height: GRID_POSTER_HEIGHT,
+    borderRadius: 10,
+    backgroundColor: '#14161B',
+    marginBottom: 6,
+  },
   scrollView: {
     flex: 1,
   },
@@ -301,7 +523,7 @@ const styles = StyleSheet.create({
     position: 'relative',
     height: 220,
     marginHorizontal: 16,
-    marginTop: 16,
+    marginTop: 8,
     borderRadius: 16,
     overflow: 'hidden',
     backgroundColor: '#14161B',
@@ -362,7 +584,7 @@ const styles = StyleSheet.create({
     alignItems: 'baseline',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    marginTop: 24,
+    marginTop: 16,
     marginBottom: 12,
   },
   sectionTitle: {
