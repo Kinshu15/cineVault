@@ -1,4 +1,4 @@
-import { MediaItem, TMDBResponse } from '../types/tmdb';
+import { MediaItem, MediaDetails, SeasonDetails, TMDBResponse } from '../types/tmdb';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p';
@@ -25,7 +25,6 @@ export const getTrendingAll = async (timeWindow: 'day' | 'week' = 'day'): Promis
   return (data.results || []).filter((item) => item.media_type !== 'person');
 };
 
-// Aliases for compatibility
 export const getTrendingMovies = getTrendingAll;
 
 export const getPopularMovies = async (page = 1): Promise<MediaItem[]> => {
@@ -56,6 +55,35 @@ export const getTopRatedMovies = async (page = 1): Promise<MediaItem[]> => {
   }
   const data: TMDBResponse<MediaItem> = await response.json();
   return (data.results || []).map((m) => ({ ...m, media_type: 'movie' as const }));
+};
+
+export const getMediaDetails = async (
+  id: string | number,
+  type: 'movie' | 'tv' = 'movie'
+): Promise<MediaDetails> => {
+  const url = `${TMDB_BASE_URL}/${type}/${id}?api_key=${API_KEY}&append_to_response=credits,videos`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${type} details: HTTP ${response.status}`);
+  }
+  const data: MediaDetails = await response.json();
+  return {
+    ...data,
+    media_type: type,
+  };
+};
+
+export const getSeasonDetails = async (
+  tvId: string | number,
+  seasonNumber: number
+): Promise<SeasonDetails> => {
+  const url = `${TMDB_BASE_URL}/tv/${tvId}/season/${seasonNumber}?api_key=${API_KEY}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch season ${seasonNumber} details: HTTP ${response.status}`);
+  }
+  const data: SeasonDetails = await response.json();
+  return data;
 };
 
 const calculateRelevanceScore = (title: string, query: string, popularity: number): number => {
@@ -106,7 +134,6 @@ export const searchMulti = async (query: string, page = 1): Promise<MediaItem[]>
   }
   const data: TMDBResponse<MediaItem> = await response.json();
   
-  // Filter out people (actors/crew) so we only display movies, TV shows, and anime series
   const results = (data.results || []).filter(
     (item) => item.media_type === 'movie' || item.media_type === 'tv'
   );
@@ -121,5 +148,4 @@ export const searchMulti = async (query: string, page = 1): Promise<MediaItem[]>
   });
 };
 
-// Backward compatibility alias
 export const searchMovies = searchMulti;
