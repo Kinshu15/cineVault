@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id          String          @id @default(cuid())
+  email       String          @unique
+  displayName String?
+  avatarUrl   String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  watchlist   WatchlistItem[]
+}
+
+enum MediaType {
+  MOVIE
+  TV
+}
+
+enum WatchlistStatus {
+  WANT_TO_WATCH
+  WATCHED
+}
+
+model WatchlistItem {
+  id        String          @id @default(cuid())
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tmdbId    Int
+  mediaType MediaType
+  status    WatchlistStatus @default(WANT_TO_WATCH)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([userId, tmdbId, mediaType])
+}
