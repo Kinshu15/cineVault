@@ -11,12 +11,19 @@ export interface AuthRequest extends Request {
 export function authenticateJWT(req: AuthRequest, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  // 1. Bearer token validation
+  if (!authHeader || typeof authHeader !== 'string') {
     res.status(401).json({ error: 'Authorization token required' });
     return;
   }
 
-  const token = authHeader.split(' ')[1];
+  const parts = authHeader.trim().split(/\s+/);
+  if (parts.length !== 2 || parts[0] !== 'Bearer' || !parts[1] || parts[1].trim() === '') {
+    res.status(401).json({ error: 'Invalid or malformed authorization header' });
+    return;
+  }
+
+  const token = parts[1].trim();
   const jwtSecret = process.env.JWT_SECRET;
 
   if (!jwtSecret || jwtSecret.trim() === '') {
@@ -28,11 +35,25 @@ export function authenticateJWT(req: AuthRequest, res: Response, next: NextFunct
   try {
     const decoded = jwt.verify(token, jwtSecret, {
       algorithms: ['HS256'],
-    }) as { userId: string; email: string };
+    });
 
+    // 2. Runtime JWT payload validation
+    if (
+      typeof decoded !== 'object' ||
+      decoded === null ||
+      typeof (decoded as Record<string, unknown>).userId !== 'string' ||
+      !(decoded as Record<string, string>).userId.trim() ||
+      typeof (decoded as Record<string, unknown>).email !== 'string' ||
+      !(decoded as Record<string, string>).email.trim()
+    ) {
+      res.status(401).json({ error: 'Invalid authentication token' });
+      return;
+    }
+
+    const payload = decoded as { userId: string; email: string };
     req.user = {
-      userId: decoded.userId,
-      email: decoded.email,
+      userId: payload.userId.trim(),
+      email: payload.email.trim(),
     };
     next();
   } catch (error: any) {

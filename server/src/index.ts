@@ -3,6 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import healthRoutes from './routes/health.routes';
 import authRoutes from './routes/auth.routes';
+import watchlistRoutes from './routes/watchlist.routes';
+import mediaRoutes from './routes/media.routes';
 
 // Load environment variables from .env
 dotenv.config();
@@ -23,12 +25,18 @@ app.use(express.json());
 // API Routes
 app.use('/api', healthRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/watchlists', watchlistRoutes);
+app.use('/api/media', mediaRoutes);
 
 // Start Server
-app.listen(PORT, () => {
-  console.log(`[cineVault Server] Running at http://localhost:${PORT}`);
-  console.log(`[cineVault Server] Health check available at http://localhost:${PORT}/api/health`);
-  console.log(`[cineVault Server] Auth routes mounted at http://localhost:${PORT}/api/auth`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, () => {
+    console.log(`[cineVault Server] Running at http://localhost:${PORT}`);
+    console.log(`[cineVault Server] Health check available at http://localhost:${PORT}/api/health`);
+    console.log(`[cineVault Server] Auth routes mounted at http://localhost:${PORT}/api/auth`);
+    console.log(`[cineVault Server] Watchlist routes mounted at http://localhost:${PORT}/api/watchlists`);
+    console.log(`[cineVault Server] Media routes mounted at http://localhost:${PORT}/api/media`);
+  });
+}
 
 export default app;

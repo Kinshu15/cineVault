@@ -45,3 +45,8 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+
+# Database dumps & test manifests
+*.dump
+.e2e-manifest*.json
+
