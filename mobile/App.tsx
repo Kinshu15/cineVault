@@ -3,6 +3,7 @@ import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import RootNavigator from './src/navigation/RootNavigator';
+import { AuthProvider } from './src/context/AuthContext';
 
 const customDarkTheme = {
   ...DarkTheme,
@@ -19,10 +20,12 @@ const customDarkTheme = {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <NavigationContainer theme={customDarkTheme}>
-        <StatusBar style="light" />
-        <RootNavigator />
-      </NavigationContainer>
+      <AuthProvider>
+        <NavigationContainer theme={customDarkTheme}>
+          <StatusBar style="light" />
+          <RootNavigator />
+        </NavigationContainer>
+      </AuthProvider>
     </SafeAreaProvider>
   );
 }

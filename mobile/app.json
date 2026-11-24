@@ -12,6 +12,7 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.cinevault.mobile",
       "backgroundColor": "#0B0C0E",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -25,7 +26,15 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-image"
-    ]
+      "expo-image",
+      "@react-native-google-signin/google-signin",
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "25c3a413-c29b-4cb0-a3b5-460033055742"
+      }
+    },
+    "owner": "prof_kushagra"
   }
 }
