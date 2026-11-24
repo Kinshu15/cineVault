@@ -33,6 +33,7 @@ describe('Media Routes & Server Mounting Integration Tests', () => {
   const originalUpsertMediaStatusWithRetry = mediaController.services.upsertMediaStatusWithRetry;
   const originalUpdateMediaStatusById = mediaController.services.updateMediaStatusById;
   const originalGetWatchedHistory = mediaController.services.getWatchedHistory;
+  const originalGetMediaTrackedStatus = mediaController.services.getMediaTrackedStatus;
   const originalWatchlistFindMany = prisma.watchlist.findMany;
   const originalWatchlistCreate = prisma.watchlist.create;
 
@@ -63,6 +64,7 @@ describe('Media Routes & Server Mounting Integration Tests', () => {
     mediaController.services.upsertMediaStatusWithRetry = originalUpsertMediaStatusWithRetry;
     mediaController.services.updateMediaStatusById = originalUpdateMediaStatusById;
     mediaController.services.getWatchedHistory = originalGetWatchedHistory;
+    mediaController.services.getMediaTrackedStatus = originalGetMediaTrackedStatus;
     prisma.watchlist.findMany = originalWatchlistFindMany;
     prisma.watchlist.create = originalWatchlistCreate;
   });
@@ -116,6 +118,22 @@ describe('Media Routes & Server Mounting Integration Tests', () => {
       assert.equal(res.status, 401);
       const data = await res.json();
       assert.equal(data.error, 'Authorization token required');
+    });
+
+    test('GET /api/media/:mediaType/:tmdbId without token returns 401', async () => {
+      const res = await fetch(`${baseUrl}/api/media/movie/550`);
+      assert.equal(res.status, 401);
+      const data = await res.json();
+      assert.equal(data.error, 'Authorization token required');
+    });
+
+    test('GET /api/media/:mediaType/:tmdbId with invalid token returns 401', async () => {
+      const res = await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: 'Bearer invalid-token' },
+      });
+      assert.equal(res.status, 401);
+      const data = await res.json();
+      assert.equal(data.error, 'Invalid authentication token');
     });
   });
 
@@ -839,6 +857,183 @@ describe('Media Routes & Server Mounting Integration Tests', () => {
       assert.equal(res.status, 201);
       const data = await res.json();
       assert.equal(data.watchlist.name, 'Classics');
+    });
+  });
+
+  describe('GET /api/media/:mediaType/:tmdbId — Title Tracking Lookup', () => {
+    test('returns 400 for invalid mediaType', async () => {
+      const res = await fetch(`${baseUrl}/api/media/book/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(res.status, 400);
+      const data = await res.json();
+      assert.match(data.error, /invalid media type/i);
+    });
+
+    test('returns 400 for invalid tmdbId (non-integer, 0, negative)', async () => {
+      for (const invalidId of ['abc', '0', '-5', '1.5']) {
+        const res = await fetch(`${baseUrl}/api/media/movie/${invalidId}`, {
+          headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+        });
+        assert.equal(res.status, 400);
+        const data = await res.json();
+        assert.match(data.error, /tmdb id/i);
+      }
+    });
+
+    test('accepts case-insensitive mediaType and passes normalized uppercase MediaType to service', async () => {
+      let capturedArgs: any = null;
+      mediaController.services.getMediaTrackedStatus = async (userId, tmdbId, mediaType) => {
+        capturedArgs = { userId, tmdbId, mediaType };
+        return { tracked: false, media: null };
+      };
+
+      const resLower = await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(resLower.status, 200);
+      assert.deepEqual(capturedArgs, {
+        userId: 'user-alpha',
+        tmdbId: 550,
+        mediaType: MediaType.MOVIE,
+      });
+
+      const resUpper = await fetch(`${baseUrl}/api/media/TV/100`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(resUpper.status, 200);
+      assert.deepEqual(capturedArgs, {
+        userId: 'user-alpha',
+        tmdbId: 100,
+        mediaType: MediaType.TV,
+      });
+
+      const resMixed = await fetch(`${baseUrl}/api/media/MoViE/999`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(resMixed.status, 200);
+      assert.deepEqual(capturedArgs, {
+        userId: 'user-alpha',
+        tmdbId: 999,
+        mediaType: MediaType.MOVIE,
+      });
+    });
+
+    test('returns 200 with tracked: false and media: null for untracked title', async () => {
+      mediaController.services.getMediaTrackedStatus = async (userId, tmdbId, mediaType) => ({
+        tracked: false,
+        media: null,
+      });
+
+      const res = await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.deepEqual(data, {
+        tracked: false,
+        media: null,
+      });
+    });
+
+    test('returns 200 with tracked: true and full media detail for tracked title', async () => {
+      mediaController.services.getMediaTrackedStatus = async (userId, tmdbId, mediaType) => ({
+        tracked: true,
+        media: {
+          id: 'um_123',
+          tmdbId: 550,
+          mediaType: MediaType.MOVIE,
+          status: WatchlistStatus.WANT_TO_WATCH,
+          title: 'Fight Club',
+          posterPath: '/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg',
+          releaseDate: '1999-10-15',
+          voteAverage: 8.4,
+          overview: 'An insomniac office worker...',
+          watchlists: [
+            {
+              id: 'wl_default',
+              name: 'My Watchlist',
+              isDefault: true,
+            },
+          ],
+        },
+      });
+
+      const res = await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.equal(data.tracked, true);
+      assert.equal(data.media.id, 'um_123');
+      assert.equal(data.media.tmdbId, 550);
+      assert.equal(data.media.mediaType, 'MOVIE');
+      assert.equal(data.media.status, 'WANT_TO_WATCH');
+      assert.equal(data.media.title, 'Fight Club');
+      assert.equal(data.media.watchlists.length, 1);
+      assert.deepEqual(data.media.watchlists[0], {
+        id: 'wl_default',
+        name: 'My Watchlist',
+        isDefault: true,
+      });
+    });
+
+    test('returns 200 with tracked: true and empty watchlists for WATCHED status with 0 memberships', async () => {
+      mediaController.services.getMediaTrackedStatus = async () => ({
+        tracked: true,
+        media: {
+          id: 'um_watched',
+          tmdbId: 550,
+          mediaType: MediaType.MOVIE,
+          status: WatchlistStatus.WATCHED,
+          title: 'Fight Club',
+          posterPath: '/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg',
+          releaseDate: '1999-10-15',
+          voteAverage: 8.4,
+          overview: 'An insomniac office worker...',
+          watchlists: [],
+        },
+      });
+
+      const res = await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(res.status, 200);
+      const data = await res.json();
+      assert.equal(data.tracked, true);
+      assert.equal(data.media.status, 'WATCHED');
+      assert.deepEqual(data.media.watchlists, []);
+    });
+
+    test('enforces cross-user isolation: passes authenticating user ID to service', async () => {
+      const calledUsers: string[] = [];
+      mediaController.services.getMediaTrackedStatus = async (userId) => {
+        calledUsers.push(userId);
+        return { tracked: false, media: null };
+      };
+
+      await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(calledUsers[0], 'user-alpha');
+
+      await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserBeta}` },
+      });
+      assert.equal(calledUsers[1], 'user-beta');
+    });
+
+    test('returns 500 when service throws unexpected error', async () => {
+      mediaController.services.getMediaTrackedStatus = async () => {
+        throw new Error('Database connection failed');
+      };
+
+      const res = await fetch(`${baseUrl}/api/media/movie/550`, {
+        headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+      });
+      assert.equal(res.status, 500);
+      const data = await res.json();
+      assert.equal(data.error, 'Internal server error');
     });
   });
 });

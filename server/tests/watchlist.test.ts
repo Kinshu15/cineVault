@@ -29,11 +29,13 @@ function createMockRequest(options: {
   email?: string;
   params?: Record<string, string>;
   body?: any;
+  query?: any;
 }): AuthRequest {
   return {
     user: options.userId ? { userId: options.userId, email: options.email || 'user@example.com' } : undefined,
     params: options.params || {},
     body: options.body || {},
+    query: options.query || {},
     headers: {},
   } as unknown as AuthRequest;
 }
@@ -624,6 +626,220 @@ describe('Watchlist Controller & Service Unit Tests (Mocked Prisma)', () => {
         () => watchlistService.handlePrismaError(generalErr),
         (thrown: any) => thrown === generalErr
       );
+    });
+  });
+
+  describe('getWatchlistItems Service & Controller Tests', () => {
+    const mockWatchlist = {
+      id: 'wl_custom_1',
+      name: 'Sci-Fi Classics',
+      isDefault: false,
+    };
+
+    const mockItems = [
+      {
+        id: 'wli_1',
+        watchlistId: 'wl_custom_1',
+        userMediaId: 'um_1',
+        createdAt: new Date('2026-02-01T10:00:00Z'),
+        userMedia: {
+          id: 'um_1',
+          tmdbId: 101,
+          mediaType: 'MOVIE',
+          status: 'WANT_TO_WATCH',
+          title: 'Interstellar',
+          posterPath: '/interstellar.jpg',
+          releaseDate: '2014-11-07',
+          voteAverage: 8.7,
+          overview: 'Space exploration to ensure human survival.',
+        },
+      },
+      {
+        id: 'wli_2',
+        watchlistId: 'wl_custom_1',
+        userMediaId: 'um_2',
+        createdAt: new Date('2026-01-15T08:00:00Z'),
+        userMedia: {
+          id: 'um_2',
+          tmdbId: 202,
+          mediaType: 'TV',
+          status: 'WATCHED',
+          title: 'Dark',
+          posterPath: '/dark.jpg',
+          releaseDate: '2017-12-01',
+          voteAverage: 8.5,
+          overview: 'Time travel mystery in Winden.',
+        },
+      },
+    ];
+
+    test('service retrieves populated watchlist with distinct membership and userMedia IDs', async () => {
+      let capturedFindFirstArgs: any = null;
+      let capturedFindManyArgs: any = null;
+
+      (prisma.watchlist as any).findFirst = async (args: any) => {
+        capturedFindFirstArgs = args;
+        return mockWatchlist;
+      };
+
+      (prisma.watchlistItem as any).findMany = async (args: any) => {
+        capturedFindManyArgs = args;
+        return mockItems;
+      };
+
+      (prisma.watchlistItem as any).count = async () => 2;
+
+      const result = await watchlistService.getWatchlistItems('user-alpha', 'wl_custom_1', {
+        page: 1,
+        limit: 20,
+      });
+
+      assert.deepEqual(capturedFindFirstArgs.where, {
+        id: 'wl_custom_1',
+        userId: 'user-alpha',
+      });
+      assert.deepEqual(capturedFindManyArgs.orderBy, [
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ]);
+      assert.equal(capturedFindManyArgs.skip, 0);
+      assert.equal(capturedFindManyArgs.take, 20);
+
+      assert.equal(result.watchlist.id, 'wl_custom_1');
+      assert.equal(result.watchlist.name, 'Sci-Fi Classics');
+      assert.equal(result.watchlist.isDefault, false);
+      assert.equal(result.items.length, 2);
+
+      // Verify ID separation
+      assert.equal(result.items[0].id, 'wli_1');
+      assert.equal(result.items[0].userMediaId, 'um_1');
+      assert.equal(result.items[0].userMedia.id, 'um_1');
+      assert.notEqual(result.items[0].id, result.items[0].userMediaId);
+      assert.equal(result.items[0].userMedia.title, 'Interstellar');
+      assert.equal(result.items[0].userMedia.status, 'WANT_TO_WATCH');
+
+      assert.deepEqual(result.pagination, {
+        page: 1,
+        limit: 20,
+        totalCount: 2,
+        totalPages: 1,
+      });
+    });
+
+    test('service returns totalCount: 0 and totalPages: 0 for empty list while preserving valid page and limit', async () => {
+      (prisma.watchlist as any).findFirst = async () => mockWatchlist;
+      (prisma.watchlistItem as any).findMany = async () => [];
+      (prisma.watchlistItem as any).count = async () => 0;
+
+      const result = await watchlistService.getWatchlistItems('user-alpha', 'wl_custom_1', {
+        page: 2,
+        limit: 10,
+      });
+
+      assert.equal(result.items.length, 0);
+      assert.deepEqual(result.pagination, {
+        page: 2,
+        limit: 10,
+        totalCount: 0,
+        totalPages: 0,
+      });
+    });
+
+    test('service throws NotFoundError when watchlist is foreign or nonexistent', async () => {
+      (prisma.watchlist as any).findFirst = async () => null;
+
+      await assert.rejects(
+        async () => {
+          await watchlistService.getWatchlistItems('user-alpha', 'foreign_id', {
+            page: 1,
+            limit: 20,
+          });
+        },
+        (err: any) => err instanceof watchlistService.NotFoundError && err.message === 'Watchlist not found'
+      );
+    });
+
+    test('controller returns 200 with data on valid request', async () => {
+      (prisma.watchlist as any).findFirst = async () => mockWatchlist;
+      (prisma.watchlistItem as any).findMany = async () => mockItems;
+      (prisma.watchlistItem as any).count = async () => 2;
+
+      const req = createMockRequest({
+        userId: 'user-alpha',
+        params: { id: 'wl_custom_1' },
+      });
+      const res = createMockResponse();
+
+      await watchlistController.getWatchlistItems(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.watchlist.id, 'wl_custom_1');
+      assert.equal(res.body.items.length, 2);
+      assert.equal(res.body.pagination.totalCount, 2);
+    });
+
+    test('controller returns 400 when watchlist ID is missing or whitespace', async () => {
+      const req = createMockRequest({
+        userId: 'user-alpha',
+        params: { id: '   ' },
+      });
+      const res = createMockResponse();
+
+      await watchlistController.getWatchlistItems(req, res);
+
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.body.error, 'Watchlist ID is required');
+    });
+
+    test('controller returns 400 when pagination parameters are invalid', async () => {
+      const reqInvalidPage = createMockRequest({
+        userId: 'user-alpha',
+        params: { id: 'wl_custom_1' },
+      });
+      (reqInvalidPage as any).query = { page: '0', limit: '20' };
+      const res1 = createMockResponse();
+
+      await watchlistController.getWatchlistItems(reqInvalidPage, res1);
+      assert.equal(res1.statusCode, 400);
+      assert.match(res1.body.error, /Page must be a positive integer/);
+
+      const reqInvalidLimit = createMockRequest({
+        userId: 'user-alpha',
+        params: { id: 'wl_custom_1' },
+      });
+      (reqInvalidLimit as any).query = { page: '1', limit: '150' };
+      const res2 = createMockResponse();
+
+      await watchlistController.getWatchlistItems(reqInvalidLimit, res2);
+      assert.equal(res2.statusCode, 400);
+      assert.match(res2.body.error, /Limit must be a positive integer between 1 and 100/);
+    });
+
+    test('controller returns 404 when service throws NotFoundError', async () => {
+      (prisma.watchlist as any).findFirst = async () => null;
+
+      const req = createMockRequest({
+        userId: 'user-alpha',
+        params: { id: 'wl_missing' },
+      });
+      const res = createMockResponse();
+
+      await watchlistController.getWatchlistItems(req, res);
+
+      assert.equal(res.statusCode, 404);
+      assert.equal(res.body.error, 'Watchlist not found');
+    });
+
+    test('controller returns 401 when req.user is absent', async () => {
+      const req = createMockRequest({
+        params: { id: 'wl_custom_1' },
+      });
+      const res = createMockResponse();
+
+      await watchlistController.getWatchlistItems(req, res);
+
+      assert.equal(res.statusCode, 401);
+      assert.equal(res.body.error, 'Unauthorized');
     });
   });
 });

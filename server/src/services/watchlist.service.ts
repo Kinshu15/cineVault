@@ -39,6 +39,39 @@ export interface WatchlistSummary {
   updatedAt: Date;
 }
 
+export interface WatchlistItemDetail {
+  id: string;
+  watchlistId: string;
+  userMediaId: string;
+  createdAt: Date;
+  userMedia: {
+    id: string;
+    tmdbId: number;
+    mediaType: string;
+    status: string;
+    title: string | null;
+    posterPath: string | null;
+    releaseDate: string | null;
+    voteAverage: number | null;
+    overview: string | null;
+  };
+}
+
+export interface WatchlistItemsResponse {
+  watchlist: {
+    id: string;
+    name: string;
+    isDefault: boolean;
+  };
+  items: WatchlistItemDetail[];
+  pagination: {
+    page: number;
+    limit: number;
+    totalCount: number;
+    totalPages: number;
+  };
+}
+
 /**
  * Maps Prisma P2002 errors targeting watchlist name uniqueness to DuplicateWatchlistNameError.
  * Safely parses error.meta?.target whether it is an array of strings, a single string, or undefined.
@@ -300,4 +333,95 @@ export async function deleteWatchlist(
 
     return { message: 'Watchlist deleted successfully' };
   });
+}
+
+/**
+ * Retrieves paginated media items inside a specific watchlist.
+ * - Enforces watchlist ownership: verifies watchlist belongs to userId.
+ * - Throws NotFoundError if watchlist is missing or foreign-owned.
+ * - Returns empty array with totalCount: 0, totalPages: 0 for empty list.
+ * - Orders items by createdAt DESC, id DESC.
+ */
+export async function getWatchlistItems(
+  userId: string,
+  watchlistId: string,
+  pagination: { page: number; limit: number }
+): Promise<WatchlistItemsResponse> {
+  const watchlist = await prisma.watchlist.findFirst({
+    where: {
+      id: watchlistId,
+      userId,
+    },
+    select: {
+      id: true,
+      name: true,
+      isDefault: true,
+    },
+  });
+
+  if (!watchlist) {
+    throw new NotFoundError('Watchlist not found');
+  }
+
+  const skip = (pagination.page - 1) * pagination.limit;
+
+  const [items, totalCount] = await Promise.all([
+    prisma.watchlistItem.findMany({
+      where: { watchlistId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip,
+      take: pagination.limit,
+      include: {
+        userMedia: {
+          select: {
+            id: true,
+            tmdbId: true,
+            mediaType: true,
+            status: true,
+            title: true,
+            posterPath: true,
+            releaseDate: true,
+            voteAverage: true,
+            overview: true,
+          },
+        },
+      },
+    }),
+    prisma.watchlistItem.count({
+      where: { watchlistId },
+    }),
+  ]);
+
+  const totalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / pagination.limit);
+
+  return {
+    watchlist: {
+      id: watchlist.id,
+      name: watchlist.name,
+      isDefault: watchlist.isDefault,
+    },
+    items: items.map((item) => ({
+      id: item.id,
+      watchlistId: item.watchlistId,
+      userMediaId: item.userMediaId,
+      createdAt: item.createdAt,
+      userMedia: {
+        id: item.userMedia.id,
+        tmdbId: item.userMedia.tmdbId,
+        mediaType: item.userMedia.mediaType,
+        status: item.userMedia.status,
+        title: item.userMedia.title,
+        posterPath: item.userMedia.posterPath,
+        releaseDate: item.userMedia.releaseDate,
+        voteAverage: item.userMedia.voteAverage,
+        overview: item.userMedia.overview,
+      },
+    })),
+    pagination: {
+      page: pagination.page,
+      limit: pagination.limit,
+      totalCount,
+      totalPages,
+    },
+  };
 }

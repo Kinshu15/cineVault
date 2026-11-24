@@ -414,4 +414,139 @@ describe('Media Service Unit Tests (Mocked Prisma & Row Locking)', () => {
     assert.equal(res.media, null);
     assert.match(res.message || '', /untracked/i);
   });
+
+  describe('getMediaTrackedStatus', () => {
+    const originalFindUnique = prisma.userMedia.findUnique;
+
+    afterEach(() => {
+      prisma.userMedia.findUnique = originalFindUnique;
+    });
+
+    test('returns tracked: false and media: null when no record exists', async () => {
+      (prisma.userMedia as any).findUnique = async (args: any) => {
+        assert.deepEqual(args.where, {
+          userId_tmdbId_mediaType: {
+            userId: 'user_1',
+            tmdbId: 550,
+            mediaType: MediaType.MOVIE,
+          },
+        });
+        return null;
+      };
+
+      const result = await mediaService.getMediaTrackedStatus('user_1', 550, MediaType.MOVIE);
+      assert.deepEqual(result, {
+        tracked: false,
+        media: null,
+      });
+    });
+
+    test('returns tracked: true with media details and watchlists when record exists with memberships', async () => {
+      (prisma.userMedia as any).findUnique = async (args: any) => {
+        assert.deepEqual(args.where, {
+          userId_tmdbId_mediaType: {
+            userId: 'user_1',
+            tmdbId: 550,
+            mediaType: MediaType.MOVIE,
+          },
+        });
+        return {
+          id: 'um_123',
+          tmdbId: 550,
+          mediaType: MediaType.MOVIE,
+          status: WatchlistStatus.WANT_TO_WATCH,
+          title: 'Fight Club',
+          posterPath: '/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg',
+          releaseDate: '1999-10-15',
+          voteAverage: 8.4,
+          overview: 'An insomniac office worker...',
+          createdAt: new Date('2026-01-01'),
+          updatedAt: new Date('2026-01-02'),
+          watchlistItems: [
+            {
+              watchlist: {
+                id: 'wl_default',
+                name: 'My Watchlist',
+                isDefault: true,
+              },
+            },
+            {
+              watchlist: {
+                id: 'wl_custom',
+                name: 'Action Favorites',
+                isDefault: false,
+              },
+            },
+          ],
+        };
+      };
+
+      const result = await mediaService.getMediaTrackedStatus('user_1', 550, MediaType.MOVIE);
+      assert.equal(result.tracked, true);
+      assert.ok(result.media !== null);
+      assert.equal(result.media?.id, 'um_123');
+      assert.equal(result.media?.tmdbId, 550);
+      assert.equal(result.media?.mediaType, MediaType.MOVIE);
+      assert.equal(result.media?.status, WatchlistStatus.WANT_TO_WATCH);
+      assert.equal(result.media?.title, 'Fight Club');
+      assert.equal(result.media?.posterPath, '/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg');
+      assert.equal(result.media?.releaseDate, '1999-10-15');
+      assert.equal(result.media?.voteAverage, 8.4);
+      assert.equal(result.media?.overview, 'An insomniac office worker...');
+      assert.equal(result.media?.watchlists.length, 2);
+      assert.deepEqual(result.media?.watchlists[0], {
+        id: 'wl_default',
+        name: 'My Watchlist',
+        isDefault: true,
+      });
+      assert.deepEqual(result.media?.watchlists[1], {
+        id: 'wl_custom',
+        name: 'Action Favorites',
+        isDefault: false,
+      });
+    });
+
+    test('returns tracked: true with empty watchlists array when status is WATCHED with zero memberships', async () => {
+      (prisma.userMedia as any).findUnique = async () => ({
+        id: 'um_watched',
+        tmdbId: 1399,
+        mediaType: MediaType.TV,
+        status: WatchlistStatus.WATCHED,
+        title: 'Game of Thrones',
+        posterPath: '/u3bZgnGQ9T01sWNhyveQz0wH0Hl.jpg',
+        releaseDate: '2011-04-17',
+        voteAverage: 8.4,
+        overview: 'Seven noble families fight for control...',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        watchlistItems: [],
+      });
+
+      const result = await mediaService.getMediaTrackedStatus('user_1', 1399, MediaType.TV);
+      assert.equal(result.tracked, true);
+      assert.ok(result.media !== null);
+      assert.equal(result.media?.status, WatchlistStatus.WATCHED);
+      assert.deepEqual(result.media?.watchlists, []);
+    });
+
+    test('enforces compound unique key lookup query structure', async () => {
+      let capturedQueryArgs: any = null;
+      (prisma.userMedia as any).findUnique = async (args: any) => {
+        capturedQueryArgs = args;
+        return null;
+      };
+
+      await mediaService.getMediaTrackedStatus('user_xyz', 999, MediaType.TV);
+      assert.ok(capturedQueryArgs);
+      assert.deepEqual(capturedQueryArgs.where.userId_tmdbId_mediaType, {
+        userId: 'user_xyz',
+        tmdbId: 999,
+        mediaType: MediaType.TV,
+      });
+      assert.ok(capturedQueryArgs.include.watchlistItems);
+      assert.ok(capturedQueryArgs.include.watchlistItems.include.watchlist.select.id);
+      assert.ok(capturedQueryArgs.include.watchlistItems.include.watchlist.select.name);
+      assert.ok(capturedQueryArgs.include.watchlistItems.include.watchlist.select.isDefault);
+    });
+  });
 });

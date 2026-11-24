@@ -67,6 +67,30 @@ export interface UpsertMediaStatusInput {
   metadata: MediaMetadata;
 }
 
+export interface MediaWatchlistMembership {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface TrackedMediaDetail {
+  id: string;
+  tmdbId: number;
+  mediaType: MediaType;
+  status: WatchlistStatus;
+  title: string | null;
+  posterPath: string | null;
+  releaseDate: string | null;
+  voteAverage: number | null;
+  overview: string | null;
+  watchlists: MediaWatchlistMembership[];
+}
+
+export interface MediaTrackedStatusResult {
+  tracked: boolean;
+  media: TrackedMediaDetail | null;
+}
+
 function formatUserMedia(record: any): UserMediaSummary {
   return {
     id: record.id,
@@ -474,6 +498,70 @@ export async function getWatchedHistory(
       limit: pagination.limit,
       totalCount,
       totalPages,
+    },
+  };
+}
+
+/**
+ * Looks up whether a specific media item is tracked by the user,
+ * returning its global status and all watchlist memberships.
+ */
+export async function getMediaTrackedStatus(
+  userId: string,
+  tmdbId: number,
+  mediaType: MediaType
+): Promise<MediaTrackedStatusResult> {
+  const userMedia = await prisma.userMedia.findUnique({
+    where: {
+      userId_tmdbId_mediaType: {
+        userId,
+        tmdbId,
+        mediaType,
+      },
+    },
+    include: {
+      watchlistItems: {
+        include: {
+          watchlist: {
+            select: {
+              id: true,
+              name: true,
+              isDefault: true,
+            },
+          },
+        },
+        orderBy: [
+          { watchlist: { isDefault: 'desc' } },
+          { watchlist: { name: 'asc' } },
+        ],
+      },
+    },
+  });
+
+  if (!userMedia) {
+    return {
+      tracked: false,
+      media: null,
+    };
+  }
+
+  return {
+    tracked: true,
+    media: {
+      id: userMedia.id,
+      tmdbId: userMedia.tmdbId,
+      mediaType: userMedia.mediaType,
+      status: userMedia.status,
+      title: userMedia.title,
+      posterPath: userMedia.posterPath,
+      releaseDate: userMedia.releaseDate,
+      voteAverage: userMedia.voteAverage,
+      overview: userMedia.overview,
+      watchlists: userMedia.watchlistItems.map((item) => ({
+        id: item.watchlist.id,
+        name: item.watchlist.name,
+        isDefault: item.watchlist.isDefault,
+      })),
     },
   };
 }

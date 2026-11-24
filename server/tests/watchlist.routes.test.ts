@@ -34,6 +34,7 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
   const originalQueryRaw = prisma.$queryRaw;
   const originalTransaction = prisma.$transaction;
   const originalWatchlistItemFindMany = prisma.watchlistItem.findMany;
+  const originalWatchlistItemCount = prisma.watchlistItem.count;
 
   before(async () => {
     // Start Express app on an ephemeral port (port 0)
@@ -75,6 +76,7 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
     prisma.$queryRaw = originalQueryRaw;
     prisma.$transaction = originalTransaction;
     prisma.watchlistItem.findMany = originalWatchlistItemFindMany;
+    prisma.watchlistItem.count = originalWatchlistItemCount;
   });
 
   // 1. GET without a token returns 401
@@ -410,5 +412,187 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
     const data = await res.json();
     assert.equal(data.status, 'ok');
     assert.ok(data.timestamp);
+  });
+
+  // =========================================================================
+  // Tests for GET /api/watchlists/:id/items
+  // =========================================================================
+
+  test('GET /api/watchlists/:id/items without a token returns 401', async () => {
+    const res = await fetch(`${baseUrl}/api/watchlists/wl_1/items`);
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, 'Authorization token required');
+  });
+
+  test('GET /api/watchlists/:id/items with invalid token returns 401', async () => {
+    const res = await fetch(`${baseUrl}/api/watchlists/wl_1/items`, {
+      headers: { Authorization: 'Bearer invalid.jwt.token' },
+    });
+    assert.equal(res.status, 401);
+    const data = await res.json();
+    assert.equal(data.error, 'Invalid authentication token');
+  });
+
+  test('GET /api/watchlists/:id/items returns 200 with populated list and distinct IDs', async () => {
+    (prisma.watchlist as any).findFirst = async (args: any) => {
+      if (args.where.id === 'wl_alpha_1' && args.where.userId === 'user-alpha') {
+        return {
+          id: 'wl_alpha_1',
+          name: 'Sci-Fi Classics',
+          isDefault: false,
+        };
+      }
+      return null;
+    };
+
+    (prisma.watchlistItem as any).findMany = async (args: any) => {
+      assert.deepEqual(args.orderBy, [{ createdAt: 'desc' }, { id: 'desc' }]);
+      return [
+        {
+          id: 'wli_membership_101',
+          watchlistId: 'wl_alpha_1',
+          userMediaId: 'um_record_202',
+          createdAt: new Date('2026-03-01T12:00:00Z'),
+          userMedia: {
+            id: 'um_record_202',
+            tmdbId: 550,
+            mediaType: 'MOVIE',
+            status: 'WANT_TO_WATCH',
+            title: 'Fight Club',
+            posterPath: '/fightclub.jpg',
+            releaseDate: '1999-10-15',
+            voteAverage: 8.4,
+            overview: 'An insomniac office worker...',
+          },
+        },
+      ];
+    };
+
+    (prisma.watchlistItem as any).count = async () => 1;
+
+    const res = await fetch(`${baseUrl}/api/watchlists/wl_alpha_1/items`, {
+      headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+    });
+
+    assert.equal(res.status, 200);
+    const data = await res.json();
+
+    assert.equal(data.watchlist.id, 'wl_alpha_1');
+    assert.equal(data.watchlist.name, 'Sci-Fi Classics');
+    assert.equal(data.watchlist.isDefault, false);
+    assert.equal(data.items.length, 1);
+
+    // Verify membership ID vs userMediaId distinction
+    assert.equal(data.items[0].id, 'wli_membership_101');
+    assert.equal(data.items[0].userMediaId, 'um_record_202');
+    assert.equal(data.items[0].userMedia.id, 'um_record_202');
+    assert.notEqual(data.items[0].id, data.items[0].userMediaId);
+    assert.equal(data.items[0].userMedia.title, 'Fight Club');
+    assert.equal(data.items[0].userMedia.status, 'WANT_TO_WATCH');
+
+    assert.deepEqual(data.pagination, {
+      page: 1,
+      limit: 20,
+      totalCount: 1,
+      totalPages: 1,
+    });
+  });
+
+  test('GET /api/watchlists/:id/items returns 200 with totalCount: 0 and totalPages: 0 for empty list', async () => {
+    (prisma.watchlist as any).findFirst = async () => ({
+      id: 'wl_empty',
+      name: 'Empty Watchlist',
+      isDefault: false,
+    });
+
+    (prisma.watchlistItem as any).findMany = async () => [];
+    (prisma.watchlistItem as any).count = async () => 0;
+
+    const res = await fetch(`${baseUrl}/api/watchlists/wl_empty/items?page=1&limit=20`, {
+      headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+    });
+
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.items.length, 0);
+    assert.deepEqual(data.pagination, {
+      page: 1,
+      limit: 20,
+      totalCount: 0,
+      totalPages: 0,
+    });
+  });
+
+  test('GET /api/watchlists/:id/items returns 404 for foreign-owned or nonexistent watchlist', async () => {
+    (prisma.watchlist as any).findFirst = async (args: any) => {
+      // User Alpha owns wl_alpha, User Beta owns wl_beta
+      if (args.where.id === 'wl_alpha' && args.where.userId === 'user-alpha') {
+        return { id: 'wl_alpha', name: 'Alpha List', isDefault: false };
+      }
+      return null;
+    };
+
+    // User Beta tries to access User Alpha's watchlist -> 404
+    const resForeign = await fetch(`${baseUrl}/api/watchlists/wl_alpha/items`, {
+      headers: { Authorization: `Bearer ${tokenUserBeta}` },
+    });
+    assert.equal(resForeign.status, 404);
+    const dataForeign = await resForeign.json();
+    assert.equal(dataForeign.error, 'Watchlist not found');
+
+    // Nonexistent watchlist -> 404
+    const resNonexistent = await fetch(`${baseUrl}/api/watchlists/wl_nonexistent/items`, {
+      headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+    });
+    assert.equal(resNonexistent.status, 404);
+    const dataNonexistent = await resNonexistent.json();
+    assert.equal(dataNonexistent.error, 'Watchlist not found');
+  });
+
+  test('GET /api/watchlists/:id/items validates pagination query parameters', async () => {
+    const resInvalidPage = await fetch(`${baseUrl}/api/watchlists/wl_1/items?page=0`, {
+      headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+    });
+    assert.equal(resInvalidPage.status, 400);
+    const data1 = await resInvalidPage.json();
+    assert.match(data1.error, /Page must be a positive integer/);
+
+    const resInvalidLimit = await fetch(`${baseUrl}/api/watchlists/wl_1/items?limit=150`, {
+      headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+    });
+    assert.equal(resInvalidLimit.status, 400);
+    const data2 = await resInvalidLimit.json();
+    assert.match(data2.error, /Limit must be a positive integer between 1 and 100/);
+  });
+
+  test('GET /api/watchlists/:id/items correctly passes custom page and limit to service', async () => {
+    let capturedArgs: any = null;
+    (prisma.watchlist as any).findFirst = async () => ({
+      id: 'wl_paged',
+      name: 'Paged List',
+      isDefault: false,
+    });
+
+    (prisma.watchlistItem as any).findMany = async (args: any) => {
+      capturedArgs = args;
+      return [];
+    };
+    (prisma.watchlistItem as any).count = async () => 12;
+
+    const res = await fetch(`${baseUrl}/api/watchlists/wl_paged/items?page=3&limit=5`, {
+      headers: { Authorization: `Bearer ${tokenUserAlpha}` },
+    });
+
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(capturedArgs.skip, 10); // (3 - 1) * 5
+    assert.equal(capturedArgs.take, 5);
+    assert.deepEqual(data.pagination, {
+      page: 3,
+      limit: 5,
+      totalCount: 12,
+      totalPages: 3,
+    });
   });
 });

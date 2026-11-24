@@ -20,6 +20,9 @@ router.patch('/:id', watchlistController.renameWatchlist);
 // DELETE /api/watchlists/:id - Delete a custom watchlist
 router.delete('/:id', watchlistController.deleteWatchlist);
 
+// GET /api/watchlists/:id/items - Retrieve paginated items inside a watchlist
+router.get('/:id/items', watchlistController.getWatchlistItems);
+
 // POST /api/watchlists/:id/items - Add a media title to a watchlist
 router.post('/:id/items', mediaController.addWatchlistItem);
 

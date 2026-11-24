@@ -19,6 +19,7 @@ export const services = {
   upsertMediaStatusWithRetry: mediaService.upsertMediaStatusWithRetry,
   updateMediaStatusById: mediaService.updateMediaStatusById,
   getWatchedHistory: mediaService.getWatchedHistory,
+  getMediaTrackedStatus: mediaService.getMediaTrackedStatus,
 };
 
 /**
@@ -252,6 +253,43 @@ export async function getWatchedHistory(req: AuthRequest, res: Response): Promis
     res.status(200).json(result);
   } catch (error: any) {
     console.error('[MediaController] Error in getWatchedHistory:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+/**
+ * GET /api/media/:mediaType/:tmdbId
+ * Retrieves tracking status, global status, and watchlist memberships for a title.
+ */
+export async function getMediaTrackedStatus(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const mediaTypeValidation = validateMediaType(req.params.mediaType);
+    if (!mediaTypeValidation.isValid) {
+      res.status(400).json({ error: mediaTypeValidation.error });
+      return;
+    }
+
+    const tmdbIdValidation = validateTmdbId(req.params.tmdbId);
+    if (!tmdbIdValidation.isValid) {
+      res.status(400).json({ error: tmdbIdValidation.error });
+      return;
+    }
+
+    const result = await services.getMediaTrackedStatus(
+      userId,
+      tmdbIdValidation.value,
+      mediaTypeValidation.value
+    );
+
+    res.status(200).json(result);
+  } catch (error: any) {
+    console.error('[MediaController] Error in getMediaTrackedStatus:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 }

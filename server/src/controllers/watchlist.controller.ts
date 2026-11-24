@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { validateCustomWatchlistName } from '../utils/validation';
+import { validateCustomWatchlistName, validatePagination } from '../utils/validation';
 import * as watchlistService from '../services/watchlist.service';
 import {
   NotFoundError,
@@ -143,6 +143,46 @@ export async function deleteWatchlist(req: AuthRequest, res: Response): Promise<
       return;
     }
     console.error('[WatchlistController] Error in deleteWatchlist:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+/**
+ * GET /api/watchlists/:id/items
+ * Retrieves paginated media items inside a specific watchlist.
+ */
+export async function getWatchlistItems(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { id } = req.params;
+    if (!id || typeof id !== 'string' || id.trim() === '') {
+      res.status(400).json({ error: 'Watchlist ID is required' });
+      return;
+    }
+
+    const paginationValidation = validatePagination(req.query?.page, req.query?.limit);
+    if (!paginationValidation.isValid) {
+      res.status(400).json({ error: paginationValidation.error });
+      return;
+    }
+
+    const result = await watchlistService.getWatchlistItems(
+      userId,
+      id.trim(),
+      paginationValidation.value
+    );
+    res.status(200).json(result);
+  } catch (error: any) {
+    if (error instanceof NotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    console.error('[WatchlistController] Error in getWatchlistItems:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 }
