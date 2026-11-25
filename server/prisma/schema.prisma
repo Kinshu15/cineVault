@@ -9,14 +9,16 @@ datasource db {
 }
 
 model User {
-  id          String          @id @default(cuid())
-  googleId    String?         @unique
-  email       String          @unique
+  id          String        @id @default(cuid())
+  googleId    String?       @unique
+  email       String        @unique
   displayName String?
   avatarUrl   String?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  watchlist   WatchlistItem[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  watchlists  Watchlist[]
+  media       UserMedia[]
 }
 
 enum MediaType {
@@ -29,15 +31,55 @@ enum WatchlistStatus {
   WATCHED
 }
 
-model WatchlistItem {
+model Watchlist {
   id        String          @id @default(cuid())
   userId    String
   user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tmdbId    Int
-  mediaType MediaType
-  status    WatchlistStatus @default(WANT_TO_WATCH)
+  name      String
+  isDefault Boolean         @default(false)
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
 
+  items     WatchlistItem[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model UserMedia {
+  id             String          @id @default(cuid())
+  userId         String
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tmdbId         Int
+  mediaType      MediaType
+  status         WatchlistStatus @default(WANT_TO_WATCH)
+
+  // Cached TMDB Metadata Snapshot
+  title          String?
+  posterPath     String?
+  releaseDate    String?
+  voteAverage    Float?
+  overview       String?
+
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  watchlistItems WatchlistItem[]
+
   @@unique([userId, tmdbId, mediaType])
+  @@index([userId, status])
+  @@index([userId])
+}
+
+model WatchlistItem {
+  id          String    @id @default(cuid())
+  watchlistId String
+  watchlist   Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  userMediaId String
+  userMedia   UserMedia @relation(fields: [userMediaId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+
+  @@unique([watchlistId, userMediaId])
+  @@index([watchlistId])
+  @@index([userMediaId])
 }

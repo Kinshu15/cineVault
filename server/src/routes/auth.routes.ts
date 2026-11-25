@@ -132,6 +132,12 @@ router.post('/google', async (req: Request, res: Response): Promise<void> => {
             email,
             displayName: payload.name || null,
             avatarUrl: payload.picture || null,
+            watchlists: {
+              create: {
+                name: 'My Watchlist',
+                isDefault: true,
+              },
+            },
           },
         });
       } catch (createErr: unknown) {

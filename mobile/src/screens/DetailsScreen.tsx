@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -7,23 +7,185 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Linking,
+  Modal,
+  TextInput,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
-import { useRoute, useNavigation, RouteProp } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
+import { useRoute, useNavigation, RouteProp, useFocusEffect } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../navigation/types';
 import { MediaDetails, Episode, Season } from '../../types/tmdb';
 import { getMediaDetails, getSeasonDetails, getImageUrl } from '../../services/tmdb';
+import { useAuth } from '../context/AuthContext';
+import {
+  getMediaTrackingStatus,
+  getWatchlists,
+  addWatchlistItem,
+  removeWatchlistItem,
+  upsertMediaStatus,
+  updateMediaStatusById,
+  createWatchlist,
+  ApiError,
+  MediaMetadataInput,
+  TrackedMediaDetail,
+  WatchlistSummary,
+  BackendMediaType,
+} from '../services/api';
 
 const BACKDROP_HEIGHT = 280;
 
 type DetailsRouteProp = RouteProp<RootStackParamList, 'Details'>;
+type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
+
+type MetadataResult =
+  | { isValid: true; metadata: MediaMetadataInput }
+  | { isValid: false; error: string };
+
+/**
+ * Validates and extracts media metadata snapshot from TMDB details.
+ * Strict rules:
+ * - Title: Mandatory non-empty string, trimmed, 1 <= length <= 255. NEVER use "Untitled" or fabrications.
+ * - Release Date: Optional. Must be valid YYYY-MM-DD and real calendar date; otherwise omitted.
+ * - Poster Path: Optional. Must match flat TMDB format /^\/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$/i; otherwise null.
+ * - Vote Average: Optional finite number between 0.0 and 10.0; otherwise null.
+ * - Overview: Optional trimmed string, max 4000 characters; otherwise null.
+ */
+function extractMediaMetadata(details: MediaDetails | null): MetadataResult {
+  if (!details) {
+    return { isValid: false, error: 'Media details are not available.' };
+  }
+
+  const rawTitle = (details.title || details.name || '').trim();
+  if (!rawTitle) {
+    return {
+      isValid: false,
+      error: 'Cannot track title: TMDB did not return a valid title for this media.',
+    };
+  }
+  if (rawTitle.length > 255) {
+    return {
+      isValid: false,
+      error: 'Media title exceeds maximum allowed length of 255 characters.',
+    };
+  }
+
+  let validReleaseDate: string | null = null;
+  const rawDate = details.release_date || details.first_air_date;
+  if (typeof rawDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawDate.trim())) {
+    const trimmed = rawDate.trim();
+    const [year, month, day] = trimmed.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    ) {
+      validReleaseDate = trimmed;
+    }
+  }
+
+  let validPosterPath: string | null = null;
+  if (
+    typeof details.poster_path === 'string' &&
+    /^\/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp)$/i.test(details.poster_path.trim())
+  ) {
+    validPosterPath = details.poster_path.trim();
+  }
+
+  let validVoteAverage: number | null = null;
+  if (typeof details.vote_average === 'number' && Number.isFinite(details.vote_average)) {
+    if (details.vote_average >= 0 && details.vote_average <= 10) {
+      validVoteAverage = details.vote_average;
+    }
+  }
+
+  let validOverview: string | null = null;
+  if (typeof details.overview === 'string' && details.overview.trim().length > 0) {
+    validOverview = details.overview.trim().slice(0, 4000);
+  }
+
+  return {
+    isValid: true,
+    metadata: {
+      title: rawTitle,
+      releaseDate: validReleaseDate,
+      posterPath: validPosterPath,
+      voteAverage: validVoteAverage,
+      overview: validOverview,
+    },
+  };
+}
+
+/**
+ * Determines whether a movie is unreleased based on TMDB release date and status.
+ *
+ * Rules:
+ * - Valid release date in past or today (<= today's local calendar date): Released (not unreleased).
+ *   A valid past or today's release date takes precedence over TMDB production status.
+ * - Valid future release date (> today's local calendar date): Unreleased.
+ * - Missing, empty, or invalid release date:
+ *   - TMDB status 'Planned', 'In Production', 'Post Production', or 'Rumored' (case-insensitive): Unreleased.
+ *   - 'Released', omitted, or unknown status: Not unreleased (allowed).
+ */
+export function isMovieUnreleased(
+  releaseDateRaw?: string | null,
+  tmdbStatusRaw?: string | null
+): boolean {
+  // 1. Validate releaseDateRaw format and real calendar date in UTC
+  let validReleaseDate: string | null = null;
+  if (typeof releaseDateRaw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(releaseDateRaw.trim())) {
+    const trimmed = releaseDateRaw.trim();
+    const [year, month, day] = trimmed.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    ) {
+      validReleaseDate = trimmed;
+    }
+  }
+
+  // 2. If a valid calendar release date exists, compare against today's local calendar date.
+  // A valid past or today's date takes precedence over TMDB status.
+  if (validReleaseDate !== null) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    const todayStr = `${y}-${m}-${d}`;
+
+    return validReleaseDate > todayStr;
+  }
+
+  // 3. Fallback: When release date is missing, empty, or invalid, consult TMDB production status
+  const normalizedStatus = (tmdbStatusRaw || '').trim().toLowerCase();
+  const unreleasedStatuses = ['planned', 'in production', 'post production', 'rumored'];
+  if (unreleasedStatuses.includes(normalizedStatus)) {
+    return true;
+  }
+
+  return false;
+}
 
 export default function DetailsScreen() {
   const route = useRoute<DetailsRouteProp>();
-  const navigation = useNavigation();
+  const navigation = useNavigation<NavigationProp>();
+  const { user, token, signOut } = useAuth();
+  const isAuthenticated = Boolean(user && token);
+
   const { id, type } = route.params;
 
+  // TMDB Identification
+  const numericTmdbId = typeof id === 'number' ? id : parseInt(String(id), 10);
+  const isValidTmdbId = Number.isSafeInteger(numericTmdbId) && numericTmdbId > 0;
+  const mediaType: 'movie' | 'tv' = type === 'tv' ? 'tv' : 'movie';
+  const backendMediaType: BackendMediaType = mediaType === 'tv' ? 'TV' : 'MOVIE';
+
+  // TMDB Content States
   const [details, setDetails] = useState<MediaDetails | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -33,37 +195,101 @@ export default function DetailsScreen() {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [loadingEpisodes, setLoadingEpisodes] = useState<boolean>(false);
 
-  // User list interaction states
-  const [inWatchlist, setInWatchlist] = useState<boolean>(false);
-  const [isWatched, setIsWatched] = useState<boolean>(false);
+  // Server-Backed Tracking & Watchlists State
+  const [trackingData, setTrackingData] = useState<TrackedMediaDetail | null>(null);
+  const [userWatchlists, setUserWatchlists] = useState<WatchlistSummary[]>([]);
+  const [isTrackingLoading, setIsTrackingLoading] = useState<boolean>(false);
+  const [isTogglingWatched, setIsTogglingWatched] = useState<boolean>(false);
 
+  // Watchlist Picker Modal State
+  const [isPickerVisible, setIsPickerVisible] = useState<boolean>(false);
+  const [mutatingWatchlistId, setMutatingWatchlistId] = useState<string | null>(null);
+  const [showCreateInput, setShowCreateInput] = useState<boolean>(false);
+  const [newWatchlistName, setNewWatchlistName] = useState<string>('');
+  const [isCreatingWatchlist, setIsCreatingWatchlist] = useState<boolean>(false);
+  const [newWatchlistError, setNewWatchlistError] = useState<string | null>(null);
+
+  // Active Request Reference for Stale Request Protection
+  const activeTrackingRequestRef = useRef<number>(0);
+  const activeDetailsRequestRef = useRef<number>(0);
+
+  // Derived tracking and media properties
+  const userMediaId = trackingData?.id || null;
+  const isWatched = trackingData?.status === 'WATCHED';
+  const memberWatchlists = trackingData?.watchlists || [];
+  const isSeries = details
+    ? details.media_type === 'tv' || (!details.title && !!details.name)
+    : mediaType === 'tv';
+  const isUnreleasedMovie = !isSeries && isMovieUnreleased(details?.release_date, details?.status);
+  const showWatchedButton = isWatched || !isUnreleasedMovie;
+
+  /**
+   * Prompts unauthenticated user to sign in before performing library actions.
+   */
+  const promptSignIn = useCallback(
+    (actionDescription: string) => {
+      Alert.alert(
+        'Sign In Required',
+        `Sign in to ${actionDescription} and sync your library across devices.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Sign In',
+            onPress: () => {
+              (navigation as any).navigate('MainTabs', { screen: 'ProfileTab' });
+            },
+          },
+        ]
+      );
+    },
+    [navigation]
+  );
+
+  /**
+   * Loads TMDB details for the title.
+   */
   useEffect(() => {
-    if (!id) return;
+    if (!isValidTmdbId) {
+      setError('Invalid media identifier provided.');
+      setLoading(false);
+      return;
+    }
+
+    const requestId = ++activeDetailsRequestRef.current;
 
     const fetchDetails = async () => {
       try {
         setLoading(true);
         setError(null);
-        const mediaType = type === 'tv' ? 'tv' : 'movie';
-        const data = await getMediaDetails(id, mediaType);
+        const data = await getMediaDetails(numericTmdbId, mediaType);
+
+        if (activeDetailsRequestRef.current !== requestId) return;
+
         setDetails(data);
 
         // If series, initialize with the first real season
         if (mediaType === 'tv' && data.seasons && data.seasons.length > 0) {
-          const firstRegularSeason = data.seasons.find((s) => s.season_number > 0) || data.seasons[0];
+          const firstRegularSeason =
+            data.seasons.find((s) => s.season_number > 0) || data.seasons[0];
           setSelectedSeason(firstRegularSeason.season_number);
         }
       } catch (err: any) {
+        if (activeDetailsRequestRef.current !== requestId) return;
         console.error('Failed to load media details:', err);
         setError(err?.message || 'Failed to load details.');
       } finally {
-        setLoading(false);
+        if (activeDetailsRequestRef.current === requestId) {
+          setLoading(false);
+        }
       }
     };
 
     fetchDetails();
-  }, [id, type]);
+  }, [isValidTmdbId, numericTmdbId, mediaType]);
 
+  /**
+   * Loads season episodes for TV shows.
+   */
   const loadEpisodesForSeason = useCallback(async (tvId: number, seasonNum: number) => {
     try {
       setLoadingEpisodes(true);
@@ -82,6 +308,339 @@ export default function DetailsScreen() {
       loadEpisodesForSeason(details.id, selectedSeason);
     }
   }, [details, selectedSeason, loadEpisodesForSeason]);
+
+  /**
+   * Loads tracking status and watchlists from the backend.
+   * Guarded against race conditions with activeTrackingRequestRef.
+   */
+  const loadTrackingAndWatchlists = useCallback(
+    async (silent = false) => {
+      if (!token || !isValidTmdbId) {
+        setTrackingData(null);
+        setUserWatchlists([]);
+        return;
+      }
+
+      const requestId = ++activeTrackingRequestRef.current;
+      if (!silent) {
+        setIsTrackingLoading(true);
+      }
+
+      try {
+        const [trackingRes, watchlistsRes] = await Promise.all([
+          getMediaTrackingStatus(mediaType, numericTmdbId, token),
+          getWatchlists(token),
+        ]);
+
+        if (activeTrackingRequestRef.current !== requestId) return;
+
+        if (trackingRes.tracked && trackingRes.media) {
+          setTrackingData(trackingRes.media);
+        } else {
+          setTrackingData(null);
+        }
+
+        // Sort watchlists: default list first, followed by custom lists
+        const sorted = [...(watchlistsRes.watchlists || [])].sort((a, b) => {
+          if (a.isDefault) return -1;
+          if (b.isDefault) return 1;
+          return 0;
+        });
+        setUserWatchlists(sorted);
+      } catch (err: unknown) {
+        if (activeTrackingRequestRef.current !== requestId) return;
+
+        if (err instanceof ApiError && err.status === 401) {
+          await signOut();
+          return;
+        }
+        console.warn('[DetailsScreen] Failed to load tracking status or watchlists:', err);
+      } finally {
+        if (activeTrackingRequestRef.current === requestId) {
+          setIsTrackingLoading(false);
+        }
+      }
+    },
+    [token, isValidTmdbId, mediaType, numericTmdbId, signOut]
+  );
+
+  // Sync tracking status when token or title changes
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadTrackingAndWatchlists(false);
+    } else {
+      setTrackingData(null);
+      setUserWatchlists([]);
+    }
+  }, [isAuthenticated, loadTrackingAndWatchlists]);
+
+  // Synchronize on focus when returning from other tabs or screens
+  useFocusEffect(
+    useCallback(() => {
+      if (isAuthenticated) {
+        loadTrackingAndWatchlists(true);
+      }
+    }, [isAuthenticated, loadTrackingAndWatchlists])
+  );
+
+  /**
+   * Toggles global watched status directly.
+   * Handles both tracked and untracked titles, and respects backend pruning.
+   */
+  const handleToggleWatched = useCallback(async () => {
+    if (!isAuthenticated) {
+      promptSignIn('mark titles as watched');
+      return;
+    }
+
+    if (isTogglingWatched || !isValidTmdbId) return;
+
+    // Defensive guard: Unreleased movies cannot be marked as WATCHED
+    if (!isWatched && isUnreleasedMovie) {
+      return;
+    }
+
+    const metaRes = extractMediaMetadata(details);
+    if (!metaRes.isValid) {
+      Alert.alert('Cannot Update Status', metaRes.error);
+      return;
+    }
+
+    setIsTogglingWatched(true);
+    try {
+      if (!isWatched) {
+        // Marking as WATCHED
+        if (userMediaId) {
+          await updateMediaStatusById(userMediaId, 'WATCHED', token);
+        } else {
+          await upsertMediaStatus(
+            {
+              tmdbId: numericTmdbId,
+              mediaType: backendMediaType,
+              status: 'WATCHED',
+              metadata: metaRes.metadata,
+            },
+            token
+          );
+        }
+      } else {
+        // Unmarking WATCHED -> set to WANT_TO_WATCH
+        if (userMediaId) {
+          await updateMediaStatusById(userMediaId, 'WANT_TO_WATCH', token);
+        } else {
+          await upsertMediaStatus(
+            {
+              tmdbId: numericTmdbId,
+              mediaType: backendMediaType,
+              status: 'WANT_TO_WATCH',
+              metadata: metaRes.metadata,
+            },
+            token
+          );
+        }
+      }
+
+      // Re-fetch clean server state
+      await loadTrackingAndWatchlists(true);
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        await signOut();
+        return;
+      }
+      const msg = err instanceof Error ? err.message : 'Failed to update watched status.';
+      Alert.alert('Error', msg);
+    } finally {
+      setIsTogglingWatched(false);
+    }
+  }, [
+    isAuthenticated,
+    isTogglingWatched,
+    isValidTmdbId,
+    details,
+    isWatched,
+    isUnreleasedMovie,
+    userMediaId,
+    token,
+    numericTmdbId,
+    backendMediaType,
+    loadTrackingAndWatchlists,
+    promptSignIn,
+    signOut,
+  ]);
+
+  /**
+   * Adds or removes the current media item from a specific watchlist.
+   */
+  const handleToggleWatchlistRow = useCallback(
+    async (watchlist: WatchlistSummary) => {
+      if (!isAuthenticated || !token || !isValidTmdbId) return;
+      if (mutatingWatchlistId !== null) return;
+
+      const isCurrentMember = memberWatchlists.some((w) => w.id === watchlist.id);
+
+      if (isCurrentMember) {
+        // Remove from watchlist
+        if (!userMediaId) {
+          Alert.alert('Error', 'Unable to resolve media identifier for removal.');
+          return;
+        }
+
+        setMutatingWatchlistId(watchlist.id);
+        try {
+          await removeWatchlistItem(watchlist.id, userMediaId, token);
+          await loadTrackingAndWatchlists(true);
+        } catch (err: unknown) {
+          if (err instanceof ApiError && err.status === 401) {
+            await signOut();
+            return;
+          }
+          const msg = err instanceof Error ? err.message : 'Failed to remove from watchlist.';
+          Alert.alert('Error', msg);
+        } finally {
+          setMutatingWatchlistId(null);
+        }
+      } else {
+        // Add to watchlist
+        const metaRes = extractMediaMetadata(details);
+        if (!metaRes.isValid) {
+          Alert.alert('Cannot Add to Watchlist', metaRes.error);
+          return;
+        }
+
+        setMutatingWatchlistId(watchlist.id);
+        try {
+          await addWatchlistItem(
+            watchlist.id,
+            {
+              tmdbId: numericTmdbId,
+              mediaType: backendMediaType,
+              metadata: metaRes.metadata,
+            },
+            token
+          );
+          await loadTrackingAndWatchlists(true);
+        } catch (err: unknown) {
+          if (err instanceof ApiError && err.status === 401) {
+            await signOut();
+            return;
+          }
+          if (err instanceof ApiError && err.status === 409) {
+            // Title already in list; sync fresh state
+            await loadTrackingAndWatchlists(true);
+            return;
+          }
+          const msg = err instanceof Error ? err.message : 'Failed to add to watchlist.';
+          Alert.alert('Error', msg);
+        } finally {
+          setMutatingWatchlistId(null);
+        }
+      }
+    },
+    [
+      isAuthenticated,
+      token,
+      isValidTmdbId,
+      mutatingWatchlistId,
+      memberWatchlists,
+      userMediaId,
+      details,
+      numericTmdbId,
+      backendMediaType,
+      loadTrackingAndWatchlists,
+      signOut,
+    ]
+  );
+
+  /**
+   * Creates a new custom watchlist from inside the picker and immediately adds the title.
+   */
+  const handleQuickCreateWatchlist = useCallback(async () => {
+    if (!isAuthenticated || !token || isCreatingWatchlist) return;
+
+    const trimmed = newWatchlistName.trim();
+    if (!trimmed) {
+      setNewWatchlistError('Watchlist name cannot be empty.');
+      return;
+    }
+    if (trimmed.length > 100) {
+      setNewWatchlistError('Watchlist name cannot exceed 100 characters.');
+      return;
+    }
+    if (trimmed.toLowerCase() === 'my watchlist') {
+      setNewWatchlistError('"My Watchlist" is a reserved system name.');
+      return;
+    }
+
+    const duplicate = userWatchlists.some(
+      (w) => w.name.trim().toLowerCase() === trimmed.toLowerCase()
+    );
+    if (duplicate) {
+      setNewWatchlistError('A watchlist with this name already exists.');
+      return;
+    }
+
+    setIsCreatingWatchlist(true);
+    setNewWatchlistError(null);
+
+    try {
+      const created = await createWatchlist(trimmed, token);
+      setNewWatchlistName('');
+      setShowCreateInput(false);
+
+      // Refresh watchlists collection
+      await loadTrackingAndWatchlists(true);
+
+      // Immediately attempt adding current title to newly created list
+      const metaRes = extractMediaMetadata(details);
+      if (metaRes.isValid) {
+        setMutatingWatchlistId(created.id);
+        try {
+          await addWatchlistItem(
+            created.id,
+            {
+              tmdbId: numericTmdbId,
+              mediaType: backendMediaType,
+              metadata: metaRes.metadata,
+            },
+            token
+          );
+          await loadTrackingAndWatchlists(true);
+        } catch (addErr: unknown) {
+          console.warn('[DetailsScreen] List created, but failed to add title:', addErr);
+          Alert.alert(
+            'Watchlist Created',
+            `"${created.name}" was created successfully. Adding "${metaRes.metadata.title}" failed; tap the list row to retry.`
+          );
+        } finally {
+          setMutatingWatchlistId(null);
+        }
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 401) {
+        await signOut();
+        return;
+      }
+      if (err instanceof ApiError && err.status === 409) {
+        setNewWatchlistError('A watchlist with this name already exists.');
+        return;
+      }
+      const msg = err instanceof Error ? err.message : 'Failed to create watchlist.';
+      setNewWatchlistError(msg);
+    } finally {
+      setIsCreatingWatchlist(false);
+    }
+  }, [
+    isAuthenticated,
+    token,
+    isCreatingWatchlist,
+    newWatchlistName,
+    userWatchlists,
+    details,
+    numericTmdbId,
+    backendMediaType,
+    loadTrackingAndWatchlists,
+    signOut,
+  ]);
 
   if (loading) {
     return (
@@ -107,7 +666,6 @@ export default function DetailsScreen() {
 
   const title = details.title || details.name || 'Untitled';
   const releaseYear = (details.release_date || details.first_air_date || '').substring(0, 4);
-  const isSeries = details.media_type === 'tv' || (!details.title && !!details.name);
 
   let durationText = '';
   if (isSeries) {
@@ -137,6 +695,14 @@ export default function DetailsScreen() {
     if (b.season_number === 0) return -1;
     return a.season_number - b.season_number;
   });
+
+  // Watchlist action button label
+  const watchlistButtonLabel =
+    memberWatchlists.length === 0
+      ? '+ Watchlist'
+      : memberWatchlists.length === 1
+      ? '✓ In Watchlist'
+      : `✓ In ${memberWatchlists.length} Lists`;
 
   return (
     <View style={styles.screen}>
@@ -181,9 +747,7 @@ export default function DetailsScreen() {
                 <View style={[styles.typeBadge, isSeries ? styles.seriesBadge : styles.movieBadge]}>
                   <Text style={styles.typeBadgeText}>{isSeries ? 'SERIES' : 'MOVIE'}</Text>
                 </View>
-                {details.status ? (
-                  <Text style={styles.statusText}>{details.status}</Text>
-                ) : null}
+                {details.status ? <Text style={styles.statusText}>{details.status}</Text> : null}
               </View>
 
               <Text style={styles.mainTitle}>{title}</Text>
@@ -224,26 +788,66 @@ export default function DetailsScreen() {
 
           {/* Action Buttons: Watchlist & Watched */}
           <View style={styles.actionsRow}>
+            {/* Watchlist Picker Action Button */}
             <TouchableOpacity
-              style={[styles.actionButton, inWatchlist && styles.actionButtonActive]}
-              onPress={() => setInWatchlist(!inWatchlist)}
+              style={[
+                styles.actionButton,
+                memberWatchlists.length > 0 && styles.actionButtonActive,
+              ]}
+              onPress={() => {
+                if (!isAuthenticated) {
+                  promptSignIn('manage your watchlists');
+                } else {
+                  setShowCreateInput(false);
+                  setNewWatchlistName('');
+                  setNewWatchlistError(null);
+                  setIsPickerVisible(true);
+                }
+              }}
               activeOpacity={0.8}
+              disabled={isTrackingLoading}
             >
-              <Text style={[styles.actionButtonText, inWatchlist && styles.actionButtonTextActive]}>
-                {inWatchlist ? '✓ In Watchlist' : '+ Watchlist'}
-              </Text>
+              {isTrackingLoading ? (
+                <ActivityIndicator size="small" color="#F5C518" />
+              ) : (
+                <Text
+                  style={[
+                    styles.actionButtonText,
+                    memberWatchlists.length > 0 && styles.actionButtonTextActive,
+                  ]}
+                >
+                  {watchlistButtonLabel}
+                </Text>
+              )}
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[styles.actionButton, isWatched && styles.actionButtonActiveGreen]}
-              onPress={() => setIsWatched(!isWatched)}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.actionButtonText, isWatched && styles.actionButtonTextActiveGreen]}>
-                {isWatched ? '✓ Watched' : 'Mark Watched'}
-              </Text>
-            </TouchableOpacity>
+            {/* Watched Status Direct Toggle (Hidden when movie is unreleased unless already watched) */}
+            {showWatchedButton ? (
+              <TouchableOpacity
+                style={[
+                  styles.actionButton,
+                  isWatched && styles.actionButtonActiveGreen,
+                ]}
+                onPress={handleToggleWatched}
+                activeOpacity={0.8}
+                disabled={isTogglingWatched || isTrackingLoading}
+              >
+                {isTogglingWatched ? (
+                  <ActivityIndicator size="small" color={isWatched ? '#FFFFFF' : '#10B981'} />
+                ) : (
+                  <Text
+                    style={[
+                      styles.actionButtonText,
+                      isWatched && styles.actionButtonTextActiveGreen,
+                    ]}
+                  >
+                    {isWatched ? '✓ Watched' : 'Mark Watched'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            ) : null}
 
+            {/* Trailer Action */}
             {trailer ? (
               <TouchableOpacity
                 style={styles.trailerButton}
@@ -254,6 +858,34 @@ export default function DetailsScreen() {
               </TouchableOpacity>
             ) : null}
           </View>
+
+          {/* Member Watchlists Badges Row */}
+          {memberWatchlists.length > 0 ? (
+            <View style={styles.membershipRow}>
+              <Text style={styles.membershipLabel}>IN WATCHLISTS</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.membershipBadgesScroll}
+              >
+                {memberWatchlists.map((wl) => (
+                  <TouchableOpacity
+                    key={`membership-badge-${wl.id}`}
+                    style={styles.membershipBadge}
+                    onPress={() => setIsPickerVisible(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name={wl.isDefault ? 'star' : 'bookmark'}
+                      size={11}
+                      color="#F5C518"
+                    />
+                    <Text style={styles.membershipBadgeText}>{wl.name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
 
           {/* Storyline Section */}
           <View style={styles.section}>
@@ -400,6 +1032,180 @@ export default function DetailsScreen() {
           ) : null}
         </View>
       </ScrollView>
+
+      {/* Watchlist Picker Modal */}
+      <Modal
+        visible={isPickerVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setIsPickerVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <SafeAreaView style={styles.modalContent} edges={['bottom']}>
+            {/* Modal Header */}
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderTitles}>
+                <Text style={styles.modalTitle}>Add to Watchlists</Text>
+                <Text style={styles.modalSubtitle} numberOfLines={1}>
+                  {title}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.modalCloseButton}
+                onPress={() => setIsPickerVisible(false)}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="close" size={20} color="#9CA3AF" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Watchlists List */}
+            <ScrollView
+              style={styles.modalList}
+              contentContainerStyle={styles.modalListContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              {userWatchlists.length === 0 ? (
+                <View style={styles.modalEmptyState}>
+                  <Text style={styles.modalEmptyText}>No watchlists found.</Text>
+                </View>
+              ) : (
+                userWatchlists.map((wl) => {
+                  const isMember = memberWatchlists.some((w) => w.id === wl.id);
+                  const isMutatingThis = mutatingWatchlistId === wl.id;
+
+                  return (
+                    <TouchableOpacity
+                      key={`modal-wl-${wl.id}`}
+                      style={[
+                        styles.watchlistPickerRow,
+                        isMember && styles.watchlistPickerRowSelected,
+                      ]}
+                      onPress={() => handleToggleWatchlistRow(wl)}
+                      disabled={mutatingWatchlistId !== null}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.pickerRowLeft}>
+                        <Ionicons
+                          name={wl.isDefault ? 'star' : 'bookmark'}
+                          size={18}
+                          color={wl.isDefault ? '#F5C518' : '#9CA3AF'}
+                        />
+                        <View style={styles.pickerRowTextCol}>
+                          <Text
+                            style={[
+                              styles.pickerRowName,
+                              isMember && styles.pickerRowNameSelected,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {wl.name}
+                          </Text>
+                          <Text style={styles.pickerRowCount}>
+                            {wl.itemCount} {wl.itemCount === 1 ? 'title' : 'titles'}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.pickerRowRight}>
+                        {isMutatingThis ? (
+                          <ActivityIndicator size="small" color="#F5C518" />
+                        ) : (
+                          <Ionicons
+                            name={isMember ? 'checkbox' : 'square-outline'}
+                            size={22}
+                            color={isMember ? '#F5C518' : '#6B7280'}
+                          />
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+
+              {/* Quick Create Watchlist Section */}
+              <View style={styles.quickCreateSection}>
+                {!showCreateInput ? (
+                  <TouchableOpacity
+                    style={styles.createToggleRow}
+                    onPress={() => {
+                      setShowCreateInput(true);
+                      setNewWatchlistError(null);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="add-circle-outline" size={20} color="#F5C518" />
+                    <Text style={styles.createToggleText}>Create New Watchlist</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <View style={styles.quickCreateBox}>
+                    <Text style={styles.quickCreateTitle}>New Watchlist</Text>
+                    <TextInput
+                      style={[
+                        styles.quickCreateInput,
+                        !!newWatchlistError && styles.quickCreateInputError,
+                      ]}
+                      placeholder="e.g. Weekend Binge"
+                      placeholderTextColor="#6B7280"
+                      value={newWatchlistName}
+                      onChangeText={(val) => {
+                        setNewWatchlistName(val);
+                        if (newWatchlistError) setNewWatchlistError(null);
+                      }}
+                      autoFocus
+                      maxLength={100}
+                    />
+                    {newWatchlistError ? (
+                      <Text style={styles.quickCreateErrorText}>{newWatchlistError}</Text>
+                    ) : null}
+
+                    <View style={styles.quickCreateActions}>
+                      <TouchableOpacity
+                        style={styles.quickCreateCancelButton}
+                        onPress={() => {
+                          setShowCreateInput(false);
+                          setNewWatchlistName('');
+                          setNewWatchlistError(null);
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.quickCreateCancelText}>Cancel</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.quickCreateSubmitButton,
+                          isCreatingWatchlist && styles.quickCreateSubmitButtonDisabled,
+                        ]}
+                        onPress={handleQuickCreateWatchlist}
+                        disabled={isCreatingWatchlist}
+                        activeOpacity={0.8}
+                      >
+                        {isCreatingWatchlist ? (
+                          <ActivityIndicator size="small" color="#000000" />
+                        ) : (
+                          <Text style={styles.quickCreateSubmitText}>Create & Add</Text>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              </View>
+            </ScrollView>
+
+            {/* Modal Done Footer */}
+            <View style={styles.modalFooter}>
+              <TouchableOpacity
+                style={styles.modalDoneButton}
+                onPress={() => setIsPickerVisible(false)}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.modalDoneButtonText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </SafeAreaView>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -630,24 +1436,24 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   actionButtonActive: {
-    backgroundColor: '#F5C518',
+    backgroundColor: 'rgba(245, 197, 24, 0.15)',
     borderColor: '#F5C518',
   },
   actionButtonActiveGreen: {
-    backgroundColor: '#10B981',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
     borderColor: '#10B981',
   },
   actionButtonText: {
-    color: '#FFFFFF',
+    color: '#E5E7EB',
     fontWeight: '700',
     fontSize: 13,
   },
   actionButtonTextActive: {
-    color: '#000000',
+    color: '#F5C518',
     fontWeight: '800',
   },
   actionButtonTextActiveGreen: {
-    color: '#FFFFFF',
+    color: '#10B981',
     fontWeight: '800',
   },
   trailerButton: {
@@ -664,6 +1470,35 @@ const styles = StyleSheet.create({
     color: '#EF4444',
     fontWeight: '700',
     fontSize: 13,
+  },
+  membershipRow: {
+    marginTop: 14,
+  },
+  membershipLabel: {
+    color: '#6B7280',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+  },
+  membershipBadgesScroll: {
+    gap: 8,
+  },
+  membershipBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#161920',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#252933',
+  },
+  membershipBadgeText: {
+    color: '#E5E7EB',
+    fontSize: 11,
+    fontWeight: '600',
   },
   section: {
     marginTop: 24,
@@ -832,5 +1667,213 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     width: '100%',
     marginTop: 2,
+  },
+
+  // Watchlist Picker Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#16181D',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '85%',
+    borderWidth: 1,
+    borderColor: '#23262F',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#23262F',
+  },
+  modalHeaderTitles: {
+    flex: 1,
+    marginRight: 12,
+  },
+  modalTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  modalSubtitle: {
+    color: '#9CA3AF',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  modalCloseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#1E2128',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalList: {
+    flexGrow: 0,
+    maxHeight: 380,
+  },
+  modalListContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  modalEmptyState: {
+    paddingVertical: 20,
+    alignItems: 'center',
+  },
+  modalEmptyText: {
+    color: '#6B7280',
+    fontSize: 13,
+    fontStyle: 'italic',
+  },
+  watchlistPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#1C1F26',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#262933',
+  },
+  watchlistPickerRowSelected: {
+    borderColor: 'rgba(245, 197, 24, 0.4)',
+    backgroundColor: 'rgba(245, 197, 24, 0.05)',
+  },
+  pickerRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  pickerRowTextCol: {
+    flex: 1,
+  },
+  pickerRowName: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  pickerRowNameSelected: {
+    color: '#F5C518',
+  },
+  pickerRowCount: {
+    color: '#6B7280',
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  pickerRowRight: {
+    width: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickCreateSection: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#23262F',
+  },
+  createToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+  },
+  createToggleText: {
+    color: '#F5C518',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  quickCreateBox: {
+    backgroundColor: '#1A1D24',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#282C36',
+  },
+  quickCreateTitle: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  quickCreateInput: {
+    backgroundColor: '#121418',
+    borderWidth: 1,
+    borderColor: '#2D323E',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: '#FFFFFF',
+    fontSize: 14,
+  },
+  quickCreateInputError: {
+    borderColor: '#EF4444',
+  },
+  quickCreateErrorText: {
+    color: '#EF4444',
+    fontSize: 12,
+    marginTop: 6,
+  },
+  quickCreateActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 12,
+  },
+  quickCreateCancelButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 6,
+  },
+  quickCreateCancelText: {
+    color: '#9CA3AF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  quickCreateSubmitButton: {
+    backgroundColor: '#F5C518',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  quickCreateSubmitButtonDisabled: {
+    opacity: 0.6,
+  },
+  quickCreateSubmitText: {
+    color: '#000000',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  modalFooter: {
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#23262F',
+  },
+  modalDoneButton: {
+    backgroundColor: '#F5C518',
+    height: 44,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalDoneButtonText: {
+    color: '#000000',
+    fontSize: 15,
+    fontWeight: '800',
   },
 });
