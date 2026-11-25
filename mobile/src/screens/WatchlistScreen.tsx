@@ -146,7 +146,8 @@ export default function WatchlistScreen() {
       setError(null);
 
       try {
-        const lists = await getWatchlists(token);
+        const response = await getWatchlists(token);
+        const lists = response.watchlists;
 
         // Sort: default list first, followed by custom lists by creation order
         const sortedLists = [...lists].sort((a, b) => {

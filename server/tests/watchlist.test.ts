@@ -50,6 +50,7 @@ describe('Watchlist Controller & Service Unit Tests (Mocked Prisma)', () => {
   const originalTransaction = prisma.$transaction;
   const originalWatchlistItemFindMany = prisma.watchlistItem.findMany;
   const originalWatchlistItemCount = prisma.watchlistItem.count;
+  const originalUserMediaCount = prisma.userMedia.count;
 
   beforeEach(() => {
     (prisma as any).$transaction = async (arg: any) => {
@@ -58,6 +59,7 @@ describe('Watchlist Controller & Service Unit Tests (Mocked Prisma)', () => {
       }
       return Promise.all(arg);
     };
+    (prisma.userMedia as any).count = async () => 0;
   });
 
   afterEach(() => {
@@ -71,6 +73,7 @@ describe('Watchlist Controller & Service Unit Tests (Mocked Prisma)', () => {
     prisma.$transaction = originalTransaction;
     prisma.watchlistItem.findMany = originalWatchlistItemFindMany;
     prisma.watchlistItem.count = originalWatchlistItemCount;
+    prisma.userMedia.count = originalUserMediaCount;
   });
 
   // 1. GET returns only the authenticated user's watchlists
@@ -99,6 +102,7 @@ describe('Watchlist Controller & Service Unit Tests (Mocked Prisma)', () => {
     assert.deepEqual(capturedWhere, { userId: 'user-alpha' });
     assert.equal(res.body.watchlists.length, 1);
     assert.equal(res.body.watchlists[0].id, 'wl_default');
+    assert.equal(typeof res.body.distinctItemCount, 'number');
   });
 
   // 2. Default watchlist appears first
@@ -840,6 +844,143 @@ describe('Watchlist Controller & Service Unit Tests (Mocked Prisma)', () => {
 
       assert.equal(res.statusCode, 401);
       assert.equal(res.body.error, 'Unauthorized');
+    });
+  });
+
+  describe('getUserWatchlists distinctItemCount Aggregation Tests', () => {
+    test('captures exact query with userId and watchlistItems.some constraint', async () => {
+      let capturedWhere: any = null;
+      (prisma.watchlist as any).findMany = async () => [];
+      (prisma.userMedia as any).count = async (args: any) => {
+        capturedWhere = args.where;
+        return 0;
+      };
+
+      const result = await watchlistService.getUserWatchlists('user-123');
+      assert.deepEqual(capturedWhere, {
+        userId: 'user-123',
+        watchlistItems: { some: {} },
+      });
+      assert.equal(result.distinctItemCount, 0);
+      assert.deepEqual(result.watchlists, []);
+    });
+
+    test('a title in one list counts once', async () => {
+      (prisma.watchlist as any).findMany = async () => [
+        {
+          id: 'wl_1',
+          name: 'My Watchlist',
+          isDefault: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { items: 1 },
+        },
+      ];
+      (prisma.userMedia as any).count = async () => 1;
+
+      const result = await watchlistService.getUserWatchlists('user-123');
+      assert.equal(result.watchlists[0].itemCount, 1);
+      assert.equal(result.distinctItemCount, 1);
+    });
+
+    test('a title in multiple lists counts once', async () => {
+      (prisma.watchlist as any).findMany = async () => [
+        {
+          id: 'wl_1',
+          name: 'My Watchlist',
+          isDefault: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { items: 1 },
+        },
+        {
+          id: 'wl_2',
+          name: 'Favorites',
+          isDefault: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { items: 1 },
+        },
+        {
+          id: 'wl_3',
+          name: 'Weekend',
+          isDefault: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { items: 1 },
+        },
+      ];
+      // Total memberships across lists = 3, but distinct titles = 1
+      (prisma.userMedia as any).count = async () => 1;
+
+      const result = await watchlistService.getUserWatchlists('user-123');
+      const totalMemberships = result.watchlists.reduce((acc, w) => acc + w.itemCount, 0);
+      assert.equal(totalMemberships, 3);
+      assert.equal(result.distinctItemCount, 1);
+    });
+
+    test('different media types with the same TMDB ID count separately', async () => {
+      (prisma.watchlist as any).findMany = async () => [
+        {
+          id: 'wl_1',
+          name: 'My Watchlist',
+          isDefault: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { items: 2 },
+        },
+      ];
+      // Movie (tmdbId: 100) and TV (tmdbId: 100) have separate UserMedia rows
+      (prisma.userMedia as any).count = async () => 2;
+
+      const result = await watchlistService.getUserWatchlists('user-123');
+      assert.equal(result.distinctItemCount, 2);
+    });
+
+    test('a tracked title with zero memberships is excluded by query constraint', async () => {
+      let capturedArgs: any = null;
+      (prisma.watchlist as any).findMany = async () => [];
+      (prisma.userMedia as any).count = async (args: any) => {
+        capturedArgs = args;
+        // User has 1 UserMedia row with status WATCHED and 0 memberships
+        // The query constraint watchlistItems: { some: {} } evaluates to false
+        return 0;
+      };
+
+      const result = await watchlistService.getUserWatchlists('user-123');
+      assert.ok(capturedArgs.where.watchlistItems);
+      assert.deepEqual(capturedArgs.where.watchlistItems, { some: {} });
+      assert.equal(result.distinctItemCount, 0);
+    });
+
+    test('another user\'s titles are excluded by userId constraint', async () => {
+      let capturedArgs: any = null;
+      (prisma.watchlist as any).findMany = async () => [];
+      (prisma.userMedia as any).count = async (args: any) => {
+        capturedArgs = args;
+        return 0;
+      };
+
+      await watchlistService.getUserWatchlists('user-alpha');
+      assert.equal(capturedArgs.where.userId, 'user-alpha');
+    });
+
+    test('empty watchlists produce a count of zero', async () => {
+      (prisma.watchlist as any).findMany = async () => [
+        {
+          id: 'wl_1',
+          name: 'My Watchlist',
+          isDefault: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          _count: { items: 0 },
+        },
+      ];
+      (prisma.userMedia as any).count = async () => 0;
+
+      const result = await watchlistService.getUserWatchlists('user-123');
+      assert.equal(result.watchlists[0].itemCount, 0);
+      assert.equal(result.distinctItemCount, 0);
     });
   });
 });

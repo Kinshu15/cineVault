@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -6,15 +6,106 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   ScrollView,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
+import { getWatchlists, getWatchedHistory, ApiError } from '../services/api';
 
 export default function ProfileScreen() {
-  const { user, isLoading, isAuthenticating, error, signIn, signOut, retrySessionRestore, clearError } =
+  const { user, token, isLoading, isAuthenticating, error, signIn, signOut, retrySessionRestore, clearError } =
     useAuth();
+
+  // Dynamic statistics state
+  const [watchedCount, setWatchedCount] = useState<number>(0);
+  const [watchlistCount, setWatchlistCount] = useState<number>(0);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+
+  // Stale request guard ref
+  const activeRequestRef = useRef<number>(0);
+
+  /**
+   * Fetches live user statistics from backend APIs:
+   * - Watched: totalCount from GET /api/media/history
+   * - Watchlist: sum of itemCount across all watchlists from GET /api/watchlists
+   */
+  const loadStats = useCallback(
+    async (isPullToRefresh = false) => {
+      if (!token || !user) {
+        setWatchedCount(0);
+        setWatchlistCount(0);
+        setIsRefreshing(false);
+        return;
+      }
+
+      const requestId = ++activeRequestRef.current;
+      if (isPullToRefresh) {
+        setIsRefreshing(true);
+      }
+
+      try {
+        const [historyRes, watchlistsRes] = await Promise.all([
+          getWatchedHistory({ page: 1, limit: 1 }, token),
+          getWatchlists(token),
+        ]);
+
+        if (activeRequestRef.current !== requestId) return;
+
+        // Watched titles count
+        setWatchedCount(historyRes.pagination.totalCount);
+
+        // Distinct titles saved in at least one watchlist
+        const rawDistinctCount = watchlistsRes?.distinctItemCount;
+        if (
+          typeof rawDistinctCount === 'number' &&
+          Number.isInteger(rawDistinctCount) &&
+          rawDistinctCount >= 0
+        ) {
+          setWatchlistCount(rawDistinctCount);
+        } else {
+          console.warn(
+            '[ProfileScreen] Received invalid distinctItemCount from backend:',
+            rawDistinctCount
+          );
+        }
+      } catch (err: unknown) {
+        if (activeRequestRef.current !== requestId) return;
+
+        if (err instanceof ApiError && err.status === 401) {
+          await signOut();
+          return;
+        }
+
+        console.warn('[ProfileScreen] Failed to fetch profile statistics:', err);
+        // On ordinary network failure, preserve previously loaded counts instead of resetting to 0
+      } finally {
+        if (activeRequestRef.current === requestId) {
+          setIsRefreshing(false);
+        }
+      }
+    },
+    [token, user, signOut]
+  );
+
+  // Reset counters to 0 immediately when user signs out
+  useEffect(() => {
+    if (!user || !token) {
+      setWatchedCount(0);
+      setWatchlistCount(0);
+    }
+  }, [user, token]);
+
+  // Refresh statistics automatically whenever ProfileScreen gains focus
+  useFocusEffect(
+    useCallback(() => {
+      if (user && token) {
+        loadStats(false);
+      }
+    }, [user, token, loadStats])
+  );
 
   const getInitials = (name: string | null, email: string): string => {
     if (name && name.trim()) {
@@ -47,7 +138,20 @@ export default function ProfileScreen() {
         <Text style={styles.headerTitle}>Profile</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          user && token ? (
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={() => loadStats(true)}
+              tintColor="#F5C518"
+              colors={['#F5C518']}
+            />
+          ) : undefined
+        }
+      >
         {/* Error Notification Banner */}
         {error && (
           <View style={styles.errorBanner}>
@@ -111,11 +215,11 @@ export default function ProfileScreen() {
         {/* Statistics Row (Watched, Watchlist, Reviews) */}
         <View style={styles.statsRow}>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>0</Text>
+            <Text style={styles.statValue}>{watchedCount}</Text>
             <Text style={styles.statLabel}>Watched</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>0</Text>
+            <Text style={styles.statValue}>{watchlistCount}</Text>
             <Text style={styles.statLabel}>Watchlist</Text>
           </View>
           <View style={styles.statBox}>

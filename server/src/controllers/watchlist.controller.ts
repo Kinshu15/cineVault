@@ -21,8 +21,11 @@ export async function getUserWatchlists(req: AuthRequest, res: Response): Promis
       return;
     }
 
-    const watchlists = await watchlistService.getUserWatchlists(userId);
-    res.status(200).json({ watchlists });
+    const result = await watchlistService.getUserWatchlists(userId);
+    res.status(200).json({
+      watchlists: result.watchlists,
+      distinctItemCount: result.distinctItemCount,
+    });
   } catch (error: any) {
     console.error('[WatchlistController] Error in getUserWatchlists:', error);
     res.status(500).json({ error: 'Internal server error' });

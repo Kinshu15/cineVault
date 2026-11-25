@@ -119,6 +119,58 @@ function extractMediaMetadata(details: MediaDetails | null): MetadataResult {
   };
 }
 
+/**
+ * Determines whether a movie is unreleased based on TMDB release date and status.
+ *
+ * Rules:
+ * - Valid release date in past or today (<= today's local calendar date): Released (not unreleased).
+ *   A valid past or today's release date takes precedence over TMDB production status.
+ * - Valid future release date (> today's local calendar date): Unreleased.
+ * - Missing, empty, or invalid release date:
+ *   - TMDB status 'Planned', 'In Production', 'Post Production', or 'Rumored' (case-insensitive): Unreleased.
+ *   - 'Released', omitted, or unknown status: Not unreleased (allowed).
+ */
+export function isMovieUnreleased(
+  releaseDateRaw?: string | null,
+  tmdbStatusRaw?: string | null
+): boolean {
+  // 1. Validate releaseDateRaw format and real calendar date in UTC
+  let validReleaseDate: string | null = null;
+  if (typeof releaseDateRaw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(releaseDateRaw.trim())) {
+    const trimmed = releaseDateRaw.trim();
+    const [year, month, day] = trimmed.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    ) {
+      validReleaseDate = trimmed;
+    }
+  }
+
+  // 2. If a valid calendar release date exists, compare against today's local calendar date.
+  // A valid past or today's date takes precedence over TMDB status.
+  if (validReleaseDate !== null) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    const todayStr = `${y}-${m}-${d}`;
+
+    return validReleaseDate > todayStr;
+  }
+
+  // 3. Fallback: When release date is missing, empty, or invalid, consult TMDB production status
+  const normalizedStatus = (tmdbStatusRaw || '').trim().toLowerCase();
+  const unreleasedStatuses = ['planned', 'in production', 'post production', 'rumored'];
+  if (unreleasedStatuses.includes(normalizedStatus)) {
+    return true;
+  }
+
+  return false;
+}
+
 export default function DetailsScreen() {
   const route = useRoute<DetailsRouteProp>();
   const navigation = useNavigation<NavigationProp>();
@@ -161,10 +213,15 @@ export default function DetailsScreen() {
   const activeTrackingRequestRef = useRef<number>(0);
   const activeDetailsRequestRef = useRef<number>(0);
 
-  // Derived tracking properties
+  // Derived tracking and media properties
   const userMediaId = trackingData?.id || null;
   const isWatched = trackingData?.status === 'WATCHED';
   const memberWatchlists = trackingData?.watchlists || [];
+  const isSeries = details
+    ? details.media_type === 'tv' || (!details.title && !!details.name)
+    : mediaType === 'tv';
+  const isUnreleasedMovie = !isSeries && isMovieUnreleased(details?.release_date, details?.status);
+  const showWatchedButton = isWatched || !isUnreleasedMovie;
 
   /**
    * Prompts unauthenticated user to sign in before performing library actions.
@@ -284,7 +341,7 @@ export default function DetailsScreen() {
         }
 
         // Sort watchlists: default list first, followed by custom lists
-        const sorted = [...watchlistsRes].sort((a, b) => {
+        const sorted = [...(watchlistsRes.watchlists || [])].sort((a, b) => {
           if (a.isDefault) return -1;
           if (b.isDefault) return 1;
           return 0;
@@ -337,6 +394,11 @@ export default function DetailsScreen() {
     }
 
     if (isTogglingWatched || !isValidTmdbId) return;
+
+    // Defensive guard: Unreleased movies cannot be marked as WATCHED
+    if (!isWatched && isUnreleasedMovie) {
+      return;
+    }
 
     const metaRes = extractMediaMetadata(details);
     if (!metaRes.isValid) {
@@ -396,6 +458,7 @@ export default function DetailsScreen() {
     isValidTmdbId,
     details,
     isWatched,
+    isUnreleasedMovie,
     userMediaId,
     token,
     numericTmdbId,
@@ -603,7 +666,6 @@ export default function DetailsScreen() {
 
   const title = details.title || details.name || 'Untitled';
   const releaseYear = (details.release_date || details.first_air_date || '').substring(0, 4);
-  const isSeries = details.media_type === 'tv' || (!details.title && !!details.name);
 
   let durationText = '';
   if (isSeries) {
@@ -759,29 +821,31 @@ export default function DetailsScreen() {
               )}
             </TouchableOpacity>
 
-            {/* Watched Status Direct Toggle */}
-            <TouchableOpacity
-              style={[
-                styles.actionButton,
-                isWatched && styles.actionButtonActiveGreen,
-              ]}
-              onPress={handleToggleWatched}
-              activeOpacity={0.8}
-              disabled={isTogglingWatched || isTrackingLoading}
-            >
-              {isTogglingWatched ? (
-                <ActivityIndicator size="small" color={isWatched ? '#FFFFFF' : '#10B981'} />
-              ) : (
-                <Text
-                  style={[
-                    styles.actionButtonText,
-                    isWatched && styles.actionButtonTextActiveGreen,
-                  ]}
-                >
-                  {isWatched ? '✓ Watched' : 'Mark Watched'}
-                </Text>
-              )}
-            </TouchableOpacity>
+            {/* Watched Status Direct Toggle (Hidden when movie is unreleased unless already watched) */}
+            {showWatchedButton ? (
+              <TouchableOpacity
+                style={[
+                  styles.actionButton,
+                  isWatched && styles.actionButtonActiveGreen,
+                ]}
+                onPress={handleToggleWatched}
+                activeOpacity={0.8}
+                disabled={isTogglingWatched || isTrackingLoading}
+              >
+                {isTogglingWatched ? (
+                  <ActivityIndicator size="small" color={isWatched ? '#FFFFFF' : '#10B981'} />
+                ) : (
+                  <Text
+                    style={[
+                      styles.actionButtonText,
+                      isWatched && styles.actionButtonTextActiveGreen,
+                    ]}
+                  >
+                    {isWatched ? '✓ Watched' : 'Mark Watched'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            ) : null}
 
             {/* Trailer Action */}
             {trailer ? (

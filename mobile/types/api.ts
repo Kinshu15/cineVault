@@ -62,6 +62,15 @@ export interface WatchlistSummary {
 }
 
 /**
+ * Response returned by GET /api/watchlists containing user watchlists
+ * and the aggregate count of unique titles saved across any watchlist.
+ */
+export interface WatchlistsResponse {
+  watchlists: WatchlistSummary[];
+  distinctItemCount: number;
+}
+
+/**
  * Minimal watchlist descriptor associated with an item or lookup.
  */
 export interface WatchlistReference {

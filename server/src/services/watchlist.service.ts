@@ -39,6 +39,11 @@ export interface WatchlistSummary {
   updatedAt: Date;
 }
 
+export interface UserWatchlistsResult {
+  watchlists: WatchlistSummary[];
+  distinctItemCount: number;
+}
+
 export interface WatchlistItemDetail {
   id: string;
   watchlistId: string;
@@ -112,38 +117,52 @@ export function handlePrismaError(error: unknown): never {
 }
 
 /**
- * Retrieves all watchlists for a given authenticated user.
+ * Retrieves all watchlists for a given authenticated user and the count of distinct saved titles.
  * - Always scoped to userId.
  * - Includes accurate itemCount aggregated via Prisma _count.
  * - Orders default list first, followed by custom lists by createdAt ascending.
+ * - distinctItemCount: count of distinct UserMedia titles saved in at least one watchlist.
  */
-export async function getUserWatchlists(userId: string): Promise<WatchlistSummary[]> {
-  const watchlists = await prisma.watchlist.findMany({
-    where: { userId },
-    select: {
-      id: true,
-      name: true,
-      isDefault: true,
-      createdAt: true,
-      updatedAt: true,
-      _count: {
-        select: { items: true },
+export async function getUserWatchlists(userId: string): Promise<UserWatchlistsResult> {
+  const [watchlists, distinctItemCount] = await Promise.all([
+    prisma.watchlist.findMany({
+      where: { userId },
+      select: {
+        id: true,
+        name: true,
+        isDefault: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: {
+          select: { items: true },
+        },
       },
-    },
-    orderBy: [
-      { isDefault: 'desc' },
-      { createdAt: 'asc' },
-    ],
-  });
+      orderBy: [
+        { isDefault: 'desc' },
+        { createdAt: 'asc' },
+      ],
+    }),
+    prisma.userMedia.count({
+      where: {
+        userId,
+        watchlistItems: {
+          some: {},
+        },
+      },
+    }),
+  ]);
 
-  return watchlists.map((w) => ({
-    id: w.id,
-    name: w.name,
-    isDefault: w.isDefault,
-    itemCount: w._count.items,
-    createdAt: w.createdAt,
-    updatedAt: w.updatedAt,
-  }));
+  return {
+    watchlists: watchlists.map((w) => ({
+      id: w.id,
+      name: w.name,
+      isDefault: w.isDefault,
+      itemCount: w._count.items,
+      createdAt: w.createdAt,
+      updatedAt: w.updatedAt,
+    })),
+    distinctItemCount,
+  };
 }
 
 /**

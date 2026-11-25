@@ -35,6 +35,7 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
   const originalTransaction = prisma.$transaction;
   const originalWatchlistItemFindMany = prisma.watchlistItem.findMany;
   const originalWatchlistItemCount = prisma.watchlistItem.count;
+  const originalUserMediaCount = prisma.userMedia.count;
 
   before(async () => {
     // Start Express app on an ephemeral port (port 0)
@@ -65,6 +66,7 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
       }
       return Promise.all(arg);
     };
+    (prisma.userMedia as any).count = async () => 0;
   });
 
   afterEach(() => {
@@ -77,6 +79,7 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
     prisma.$transaction = originalTransaction;
     prisma.watchlistItem.findMany = originalWatchlistItemFindMany;
     prisma.watchlistItem.count = originalWatchlistItemCount;
+    prisma.userMedia.count = originalUserMediaCount;
   });
 
   // 1. GET without a token returns 401
@@ -147,6 +150,7 @@ describe('Watchlist Routes & Express Mounting Integration Tests', () => {
     assert.equal(data.watchlists.length, 1);
     assert.equal(data.watchlists[0].id, 'wl_default_alpha');
     assert.equal(data.watchlists[0].itemCount, 3);
+    assert.equal(typeof data.distinctItemCount, 'number');
   });
 
   // 6. Authenticated POST creates a custom list

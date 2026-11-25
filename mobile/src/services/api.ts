@@ -8,6 +8,7 @@ import {
   PaginationParams,
   PaginationMetadata,
   WatchlistSummary,
+  WatchlistsResponse,
   WatchlistReference,
   WatchlistItemDetail,
   WatchlistItemsResponse,
@@ -191,16 +192,15 @@ export async function fetchCurrentUser(token: string): Promise<UserProfile> {
 // =============================================================================
 
 /**
- * 1. Retrieves all watchlists for the authenticated user.
+ * 1. Retrieves all watchlists for the authenticated user and distinct saved title count.
  * Endpoint: GET /api/watchlists
  */
-export async function getWatchlists(token?: string | null): Promise<WatchlistSummary[]> {
-  const data = await authenticatedRequest<{ watchlists: WatchlistSummary[] }>(
+export async function getWatchlists(token?: string | null): Promise<WatchlistsResponse> {
+  return await authenticatedRequest<WatchlistsResponse>(
     '/api/watchlists',
     { method: 'GET' },
     token
   );
-  return data.watchlists;
 }
 
 /**
