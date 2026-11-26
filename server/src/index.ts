@@ -30,7 +30,7 @@ app.use('/api/media', mediaRoutes);
 
 // Start Server
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, () => {
+  app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`[cineVault Server] Running at http://localhost:${PORT}`);
     console.log(`[cineVault Server] Health check available at http://localhost:${PORT}/api/health`);
     console.log(`[cineVault Server] Auth routes mounted at http://localhost:${PORT}/api/auth`);
